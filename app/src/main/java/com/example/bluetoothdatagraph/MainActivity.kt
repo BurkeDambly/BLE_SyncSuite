@@ -49,6 +49,26 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
+// --- Animations ---
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import androidx.compose.animation.Crossfade // Make sure this is imported
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextAlign
 
 // --- Main App Logic Starts Here ---
 
@@ -57,6 +77,10 @@ class MainActivity : ComponentActivity() {
     // This is a relative list that updates the UI when modified.
     // We can store the device names and addr as string in a list
     private val scannedDevices: SnapshotStateList<String> = mutableStateListOf()
+
+    // Keeps track of whether the welcome screen is currently showing.
+    // Once the animation ends, we set this to false and show the scanner list.
+    private var showWelcomeScreen by mutableStateOf(true)
 
     // Holds a reference to the currently visible Toast message.
     // This allows us to cancel any existing Toast before showing a new one,
@@ -111,33 +135,49 @@ class MainActivity : ComponentActivity() {
             BluetoothDataGraphTheme {
                 // Surface is like a full-screen background with default theme color
                 Surface(color = MaterialTheme.colorScheme.background) {
+                    Crossfade(targetState = showWelcomeScreen,
+                        animationSpec = tween(durationMillis = 1500)
+                    ) { showingWelcome ->
+                    // If the welcome screen flag is true, show welcome screen
+                    if(showingWelcome){
+                        WelcomeScreen {
+                            // After welcome animation finishes, switch to scanner list
+                            showWelcomeScreen = false
+                        }
+                    } else {
 
-                    // Column is a vertical layout container that expands to fill the screen
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()        // Use the full available width and height
-                            .padding(16.dp)       // Add uniform padding around the list
-                    ) {
-                        // Lazy Column is like a vertical scrolling list that
-                        // only draws the items that are currently on screen
-                        LazyColumn {
-                            //items() loops through each item in scannedDevices
-                            // For each device, it creates a text element to show the name + address
-                            items(scannedDevices){ deviceInfo ->
-                                Text(
-                                    text = deviceInfo,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    modifier = Modifier
-                                        .padding(16.dp)
-                                        .clickable {
-                                            // Cancel the current toast if it’s still showing
-                                            currentToast?.cancel()
+                        // Column is a vertical layout container that expands to fill the screen
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()        // Use the full available width and height
+                                .padding(16.dp)       // Add uniform padding around the list
+                        ) {
+                            // Lazy Column is like a vertical scrolling list that
+                            // only draws the items that are currently on screen
+                            LazyColumn {
+                                //items() loops through each item in scannedDevices
+                                // For each device, it creates a text element to show the name + address
+                                items(scannedDevices) { deviceInfo ->
+                                    Text(
+                                        text = deviceInfo,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        modifier = Modifier
+                                            .padding(16.dp)
+                                            .clickable {
+                                                // Cancel the current toast if it’s still showing
+                                                currentToast?.cancel()
 
-                                            // Show new toast with SHORT duration
-                                            currentToast = Toast.makeText(this@MainActivity, "Clicked: $deviceInfo", Toast.LENGTH_SHORT)
-                                            currentToast?.show()
-                                        },
-                                )
+                                                // Show new toast with SHORT duration
+                                                currentToast = Toast.makeText(
+                                                    this@MainActivity,
+                                                    "Clicked: $deviceInfo",
+                                                    Toast.LENGTH_SHORT
+                                                )
+                                                currentToast?.show()
+                                            },
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -239,6 +279,62 @@ class MainActivity : ComponentActivity() {
 
             // Log an error message
             Log.e("BLE", "Scan failed with error code: $errorCode")
+        }
+    }
+
+    // This composable function displays a welcome screen with a fade+zoom animation.
+    // It runs once at startup, fades in/out a title, then signals the app to switch screens.
+    @Composable
+    private fun WelcomeScreen(onAnimationFinished: () -> Unit) {
+        // Controls the fade-in and scale-in animation
+        val visible = remember { mutableStateOf(false) }
+
+        val alpha by animateFloatAsState(
+            targetValue = if (visible.value) 1f else 0f,
+            animationSpec = tween(durationMillis = 1000)
+        )
+
+        val scale by animateFloatAsState(
+            targetValue = if (visible.value) 1f else 0.95f,
+            animationSpec = tween(durationMillis = 1000)
+        )
+
+        // Launch animation, then wait and switch screens
+        LaunchedEffect(Unit) {
+            visible.value = true
+            delay(3000)
+            onAnimationFinished()
+        }
+
+        // Main centered layout with fade/scale applied
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .alpha(alpha)
+                .scale(scale)
+                .padding(horizontal = 24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // App title
+            Text(
+                text = "BLE Visualizer Demo",
+                fontSize = 52.sp,
+                color = Color(0xFF3F51B5),
+                lineHeight = 60.sp,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Subtitle
+            Text(
+                text = "Scan. Connect. Visualize.",
+                fontSize = 20.sp,
+                color = Color(0xFF607D8B),
+                textAlign = TextAlign.Center,
+                lineHeight = 28.sp
+            )
         }
     }
 
