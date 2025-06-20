@@ -34,11 +34,34 @@ import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.util.Log
 import androidx.annotation.RequiresPermission
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+
+// --- Jetpack Compose: State-Driven Lists ---
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.snapshots.SnapshotStateList
+
+// --- GUI Elements ---
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 
 
 // --- Main App Logic Starts Here ---
 
 class MainActivity : ComponentActivity() {
+
+    // This is a relative list that updates the UI when modified.
+    // We can store the device names and addr as string in a list
+    private val scannedDevices: SnapshotStateList<String> = mutableStateListOf()
+
+    // Holds a reference to the currently visible Toast message.
+    // This allows us to cancel any existing Toast before showing a new one,
+    // which prevents overlapping or delayed popups when users click quickly.
+    private var currentToast: Toast? = null
 
     // This is a list of all the permissions we want to request from the user at runtime.
     // Android doesn't grant these automatically; the user must approve them.
@@ -88,8 +111,36 @@ class MainActivity : ComponentActivity() {
             BluetoothDataGraphTheme {
                 // Surface is like a full-screen background with default theme color
                 Surface(color = MaterialTheme.colorScheme.background) {
-                    // Display simple text in the middle of the screen
-                    Text(text = "Bluetooth Permission App Started")
+
+                    // Column is a vertical layout container that expands to fill the screen
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()        // Use the full available width and height
+                            .padding(16.dp)       // Add uniform padding around the list
+                    ) {
+                        // Lazy Column is like a vertical scrolling list that
+                        // only draws the items that are currently on screen
+                        LazyColumn {
+                            //items() loops through each item in scannedDevices
+                            // For each device, it creates a text element to show the name + address
+                            items(scannedDevices){ deviceInfo ->
+                                Text(
+                                    text = deviceInfo,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier
+                                        .padding(16.dp)
+                                        .clickable {
+                                            // Cancel the current toast if it’s still showing
+                                            currentToast?.cancel()
+
+                                            // Show new toast with SHORT duration
+                                            currentToast = Toast.makeText(this@MainActivity, "Clicked: $deviceInfo", Toast.LENGTH_SHORT)
+                                            currentToast?.show()
+                                        },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -168,8 +219,14 @@ class MainActivity : ComponentActivity() {
             if (hasConnectPermission) {
                 val deviceName = result.device.name ?: "Unnamed"
                 val deviceAddress = result.device.address
+                val displayString = "$deviceName [$deviceAddress]"
 
                 Log.d("BLE", "Found device: $deviceName [$deviceAddress]")
+
+                if(!scannedDevices.contains(displayString)){
+                    scannedDevices.add(displayString)
+                }
+
             } else {
                 Log.w("BLE", "BLUETOOTH_CONNECT permission not granted — skipping device info")
             }
