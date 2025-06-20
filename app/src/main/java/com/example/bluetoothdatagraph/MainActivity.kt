@@ -93,6 +93,9 @@ class MainActivity : ComponentActivity() {
     // Keeps track of the switch state for BLE scanning
     private var isScanning by mutableStateOf(false)
 
+    // Used for keeping track of the available connections with filter
+    private var searchQuery by mutableStateOf("")
+
     // This is a list of all the permissions we want to request from the user at runtime.
     // Android doesn't grant these automatically; the user must approve them.
     private val permissions = arrayOf(
@@ -157,18 +160,27 @@ class MainActivity : ComponentActivity() {
                                 .padding(16.dp)       // Add uniform padding around the list
                         ) {
 
+                            // A toggle switch to start or stop BLE scanning
                             BleScanToggle(
-                                isScanning = isScanning,
-                                onToggle = { toggled ->
-                                    isScanning = toggled
+                                isScanning = isScanning, // Current scan state (true = scanning, false = idle)
+
+                                onToggle = { toggled -> // Called when the user flips the switch
+                                    isScanning = toggled // Update the scanning state
+
                                     if (toggled) {
-                                        scannedDevices.clear()
-                                        startBleScan()
+                                        scannedDevices.clear() // Clear previous results before starting a new scan
+                                        startBleScan()         // Begin scanning for BLE devices
                                     } else {
-                                        stopBleScan()
-                                        scannedDevices.clear()
+                                        stopBleScan()          // Stop the BLE scan
+                                        scannedDevices.clear() // Clear the device list when scanning is stopped
                                     }
                                 }
+                            )
+
+                            // A search/filter bar that updates the device list in real time
+                            FilterBar(
+                                query = searchQuery, // The current text input from the user
+                                onQueryChanged = { searchQuery = it } // Updates the searchQuery state whenever the user types
                             )
 
                             // Lazy Column is like a vertical scrolling list that
@@ -176,7 +188,11 @@ class MainActivity : ComponentActivity() {
                             LazyColumn {
                                 //items() loops through each item in scannedDevices
                                 // For each device, it creates a text element to show the name + address
-                                items(scannedDevices) { deviceInfo ->
+                                val filteredDevices = scannedDevices.filter {
+                                    it.contains(searchQuery, ignoreCase = true)
+                                }
+
+                                items(filteredDevices) { deviceInfo ->
                                     Text(
                                         text = deviceInfo,
                                         style = MaterialTheme.typography.bodyLarge,
@@ -318,87 +334,108 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // This composable function displays a welcome screen with a fade+zoom animation.
-    // It runs once at startup, fades in/out a title, then signals the app to switch screens.
+    // This composable function displays a welcome screen with a fade-in and zoom-in animation.
+// It shows the app title and subtitle at launch, then transitions to the main screen.
     @Composable
     private fun WelcomeScreen(onAnimationFinished: () -> Unit) {
-        // Controls the fade-in and scale-in animation
+        // State variable that controls when to start the animations
         val visible = remember { mutableStateOf(false) }
 
+        // Animates the screen's opacity from 0 (invisible) to 1 (fully visible)
         val alpha by animateFloatAsState(
-            targetValue = if (visible.value) 1f else 0f,
-            animationSpec = tween(durationMillis = 1000)
+            targetValue = if (visible.value) 1f else 0f, // Animate to visible if 'visible' is true
+            animationSpec = tween(durationMillis = 1000) // Duration of the fade-in animation
         )
 
+        // Animates the screen's scale from 95% to 100% for a subtle zoom-in effect
         val scale by animateFloatAsState(
             targetValue = if (visible.value) 1f else 0.95f,
-            animationSpec = tween(durationMillis = 1000)
+            animationSpec = tween(durationMillis = 1000) // Duration of the scale animation
         )
 
-        // Launch animation, then wait and switch screens
+        // Launch the animation and hold the welcome screen for 3 seconds
         LaunchedEffect(Unit) {
-            visible.value = true
-            delay(3000)
-            onAnimationFinished()
+            visible.value = true // Start fade/scale animations
+            delay(2700) // Hold the welcome screen for 3 seconds
+            onAnimationFinished() // Trigger transition to main screen
         }
 
-        // Main centered layout with fade/scale applied
+        // Layout container for the welcome content
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .alpha(alpha)
-                .scale(scale)
-                .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+                .fillMaxSize() // Take up the full screen
+                .alpha(alpha) // Apply animated fade-in
+                .scale(scale) // Apply animated zoom-in
+                .padding(horizontal = 24.dp), // Horizontal padding
+            verticalArrangement = Arrangement.Center, // Center content vertically
+            horizontalAlignment = Alignment.CenterHorizontally // Center content horizontally
         ) {
-            // App title
+            // Main app title
             Text(
                 text = "BLE Visualizer Demo",
-                fontSize = 52.sp,
-                color = Color(0xFF3F51B5),
+                fontSize = 52.sp, // Large title text
+                color = Color(0xFF3F51B5), // Indigo color
                 lineHeight = 60.sp,
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp)) // Vertical space between title and subtitle
 
-            // Subtitle
+            // App subtitle or slogan
             Text(
                 text = "Scan. Connect. Visualize.",
-                fontSize = 20.sp,
-                color = Color(0xFF607D8B),
+                fontSize = 20.sp, // Smaller subtitle
+                color = Color(0xFF607D8B), // Soft gray-blue color
                 textAlign = TextAlign.Center,
                 lineHeight = 28.sp
             )
         }
     }
 
+    // Composable UI function that displays a labeled toggle switch for BLE scanning
     @Composable
     fun BleScanToggle(
-        isScanning: Boolean,
-        onToggle: (Boolean) -> Unit
+        isScanning: Boolean, // Current scan state (true = scanning, false = not scanning)
+        onToggle: (Boolean) -> Unit // Callback when the switch is toggled
     ) {
+        // Horizontal row layout that contains the label and switch
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .fillMaxWidth() // Make the row span the full width of the screen
+                .padding(horizontal = 16.dp, vertical = 12.dp), // Add padding on the sides and top/bottom
+            verticalAlignment = Alignment.CenterVertically, // Vertically center the items in the row
+            horizontalArrangement = Arrangement.SpaceBetween // Push label and switch to opposite ends
         ) {
-            // Label
+            // Text label that reflects the current scanning status
             Text(
-                text = if (isScanning) "Scanning Enabled" else "Scan Disabled",
-                fontSize = 20.sp,
-                color = if (isScanning) Color(0xFF3F51B5) else Color.Gray
+                text = if (isScanning) "Scanning Enabled" else "Scan Disabled", // Dynamic label
+                fontSize = 20.sp, // Font size for the label
+                color = if (isScanning) Color(0xFF3F51B5) else Color.Gray // Color changes based on state
             )
 
-            // Toggle switch
+            // Switch that controls scanning; checked = scanning
             Switch(
-                checked = isScanning,
-                onCheckedChange = onToggle
+                checked = isScanning, // Bind the switch to the current scan state
+                onCheckedChange = onToggle // Trigger the callback when the user toggles it
             )
         }
+    }
+
+    // Composable UI function that renders a filter/search bar
+    @Composable
+    fun FilterBar(
+        query: String, // Current text entered in the search bar
+        onQueryChanged: (String) -> Unit // Callback to update the search text as the user types
+    ) {
+        // An outlined text input field with a label
+        androidx.compose.material3.OutlinedTextField(
+            value = query, // Bind the current input value to the field
+            onValueChange = onQueryChanged, // Call this whenever the user types
+            label = { Text("Filter devices...") }, // Label shown inside the input field
+            modifier = Modifier
+                .fillMaxWidth() // Make the input field span the full width
+                .padding(horizontal = 16.dp) // Add horizontal padding to separate from screen edge
+        )
     }
 
 }
