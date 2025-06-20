@@ -64,8 +64,11 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import androidx.compose.animation.Crossfade // Make sure this is imported
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.material3.Switch
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextAlign
@@ -86,6 +89,9 @@ class MainActivity : ComponentActivity() {
     // This allows us to cancel any existing Toast before showing a new one,
     // which prevents overlapping or delayed popups when users click quickly.
     private var currentToast: Toast? = null
+
+    // Keeps track of the switch state for BLE scanning
+    private var isScanning by mutableStateOf(false)
 
     // This is a list of all the permissions we want to request from the user at runtime.
     // Android doesn't grant these automatically; the user must approve them.
@@ -120,8 +126,6 @@ class MainActivity : ComponentActivity() {
             } else {
                 // All permissions granted — app is ready to scan/connect
                 Toast.makeText(this, "All permissions granted!", Toast.LENGTH_SHORT).show()
-
-                startBleScan()
             }
         }
 
@@ -152,6 +156,21 @@ class MainActivity : ComponentActivity() {
                                 .fillMaxSize()        // Use the full available width and height
                                 .padding(16.dp)       // Add uniform padding around the list
                         ) {
+
+                            BleScanToggle(
+                                isScanning = isScanning,
+                                onToggle = { toggled ->
+                                    isScanning = toggled
+                                    if (toggled) {
+                                        scannedDevices.clear()
+                                        startBleScan()
+                                    } else {
+                                        stopBleScan()
+                                        scannedDevices.clear()
+                                    }
+                                }
+                            )
+
                             // Lazy Column is like a vertical scrolling list that
                             // only draws the items that are currently on screen
                             LazyColumn {
@@ -219,7 +238,6 @@ class MainActivity : ComponentActivity() {
         } else {
             // Nothing to request — let the user know
             Toast.makeText(this, "All permissions already granted!", Toast.LENGTH_SHORT).show()
-            startBleScan()
         }
     }
 
@@ -244,12 +262,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun stopBleScan() {
+        // Check for runtime permission before starting scan
+        val hasScanPermission = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.BLUETOOTH_SCAN
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasScanPermission) {
+            bluetoothLeScanner?.stopScan(bleScanCallback)
+            Log.d("BLE", "Started BLE Scan")
+        } else {
+            Log.e("BLE", "BLUETOOTH_SCAN permission not granted — scan aborted")
+            Toast.makeText(this, "Scan permission not granted", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     // This is the callback that Android calls every time a BLE device is found while scanning
     private val bleScanCallback = object : ScanCallback(){
         // Called when a device is found
 
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
+
+            // Add this guard clause to prevent race condition
+            if (!isScanning) return
 
             // Check if we have permission to read Bluetooth device details
             val hasConnectPermission = ContextCompat.checkSelfPermission(
@@ -334,6 +370,33 @@ class MainActivity : ComponentActivity() {
                 color = Color(0xFF607D8B),
                 textAlign = TextAlign.Center,
                 lineHeight = 28.sp
+            )
+        }
+    }
+
+    @Composable
+    fun BleScanToggle(
+        isScanning: Boolean,
+        onToggle: (Boolean) -> Unit
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Label
+            Text(
+                text = if (isScanning) "Scanning Enabled" else "Scan Disabled",
+                fontSize = 20.sp,
+                color = if (isScanning) Color(0xFF3F51B5) else Color.Gray
+            )
+
+            // Toggle switch
+            Switch(
+                checked = isScanning,
+                onCheckedChange = onToggle
             )
         }
     }
