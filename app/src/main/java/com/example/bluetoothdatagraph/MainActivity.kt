@@ -237,7 +237,7 @@ class MainActivity : ComponentActivity() {
         override fun onScanFailed(errorCode: Int) {
             super.onScanFailed(errorCode)
 
-            // Log an error message with the error code
+            // Log an error message
             Log.e("BLE", "Scan failed with error code: $errorCode")
         }
     }
