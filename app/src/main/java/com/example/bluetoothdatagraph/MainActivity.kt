@@ -27,11 +27,17 @@ import com.example.bluetoothdatagraph.ui.theme.BluetoothDataGraphTheme // Auto-g
 
 // --- Bluetooth Connection ---
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.compose.foundation.clickable
@@ -68,10 +74,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextAlign
+import java.util.UUID
 
 // --- Main App Logic Starts Here ---
 
@@ -95,6 +103,18 @@ class MainActivity : ComponentActivity() {
 
     // Used for keeping track of the available connections with filter
     private var searchQuery by mutableStateOf("")
+
+    // Holds the connection to the GATT server once connected
+    private var bluetoothGatt: BluetoothGatt? = null
+
+    // Used to move into the graphing screen
+    private var showDataScreen by mutableStateOf(false)
+
+    // Signals when the device connects
+    private var connectedDeviceName by mutableStateOf("")
+
+    // The data coming from the device
+    private val receivedDataList = mutableStateListOf<String>()
 
     // This is a list of all the permissions we want to request from the user at runtime.
     // Android doesn't grant these automatically; the user must approve them.
@@ -138,89 +158,18 @@ class MainActivity : ComponentActivity() {
 
         // Set up the UI using Jetpack Compose instead of XML layout
         setContent {
-            // Apply the Material3 app theme (colors, typography, spacing, etc.)
             BluetoothDataGraphTheme {
-                // Surface is like a full-screen background with default theme color
                 Surface(color = MaterialTheme.colorScheme.background) {
-                    Crossfade(targetState = showWelcomeScreen,
-                        animationSpec = tween(durationMillis = 1500)
-                    ) { showingWelcome ->
-                    // If the welcome screen flag is true, show welcome screen
-                    if(showingWelcome){
-                        WelcomeScreen {
-                            // After welcome animation finishes, switch to scanner list
+                    when {
+                        showWelcomeScreen -> WelcomeScreen {
                             showWelcomeScreen = false
                         }
-                    } else {
-
-                        // Column is a vertical layout container that expands to fill the screen
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()        // Use the full available width and height
-                                .padding(16.dp)       // Add uniform padding around the list
-                        ) {
-
-                            // A toggle switch to start or stop BLE scanning
-                            BleScanToggle(
-                                isScanning = isScanning, // Current scan state (true = scanning, false = idle)
-
-                                onToggle = { toggled -> // Called when the user flips the switch
-                                    isScanning = toggled // Update the scanning state
-
-                                    if (toggled) {
-                                        scannedDevices.clear() // Clear previous results before starting a new scan
-                                        startBleScan()         // Begin scanning for BLE devices
-                                    } else {
-                                        stopBleScan()          // Stop the BLE scan
-                                        scannedDevices.clear() // Clear the device list when scanning is stopped
-                                    }
-                                }
-                            )
-
-                            // A search/filter bar that updates the device list in real time
-                            FilterBar(
-                                query = searchQuery, // The current text input from the user
-                                onQueryChanged = { searchQuery = it } // Updates the searchQuery state whenever the user types
-                            )
-
-                            // Lazy Column is like a vertical scrolling list that
-                            // only draws the items that are currently on screen
-                            LazyColumn {
-                                //items() loops through each item in scannedDevices
-                                // For each device, it creates a text element to show the name + address
-                                val filteredDevices = scannedDevices.filter {
-                                    it.contains(searchQuery, ignoreCase = true)
-                                }
-
-                                items(filteredDevices) { deviceInfo ->
-                                    Text(
-                                        text = deviceInfo,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        modifier = Modifier
-                                            .padding(16.dp)
-                                            .clickable {
-                                                // Cancel the current toast if it’s still showing
-                                                currentToast?.cancel()
-
-                                                // Show new toast with SHORT duration
-                                                currentToast = Toast.makeText(
-                                                    this@MainActivity,
-                                                    "Clicked: $deviceInfo",
-                                                    Toast.LENGTH_SHORT
-                                                )
-                                                currentToast?.show()
-                                            },
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                        showDataScreen -> DataDisplayScreen(connectedDeviceName)
+                        else -> MainScannerScreen()
                     }
                 }
             }
         }
-
-
 
         // Get the system's Bluetooth service from Android. This returns a BluetoothManager object.
         // We're using "getSystemService" to get a system-level object. It's like a global accessor.
@@ -241,6 +190,8 @@ class MainActivity : ComponentActivity() {
         requestPermissionsModernWay()
     }
 
+
+
     // This function filters out already-granted permissions and only asks for what’s missing
     private fun requestPermissionsModernWay() {
         // Check each permission and keep only the ones that haven't been granted yet
@@ -257,9 +208,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+
+
     // THis function starts the bluetooth low energy scan
     // it uses the adapter to get the ble scanner, then starts scanning and logs the action
-
     private fun startBleScan() {
         // Get the BLE scanner from the adapter
         bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
@@ -278,6 +230,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+
+
     private fun stopBleScan() {
         // Check for runtime permission before starting scan
         val hasScanPermission = ContextCompat.checkSelfPermission(
@@ -292,6 +246,8 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Scan permission not granted", Toast.LENGTH_SHORT).show()
         }
     }
+
+
 
     // This is the callback that Android calls every time a BLE device is found while scanning
     private val bleScanCallback = object : ScanCallback(){
@@ -325,6 +281,7 @@ class MainActivity : ComponentActivity() {
 
         }
 
+
         // Called if scanning fails for some reason
         override fun onScanFailed(errorCode: Int) {
             super.onScanFailed(errorCode)
@@ -334,8 +291,207 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+
+
+    // Callback to handle GATT events such as connection state changes and service discovery
+    private val gattCallback = object : BluetoothGattCallback() {
+
+        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            Log.i("BLE", "onConnectionStateChange: status=$status, newState=$newState")
+
+            // If the connection failed, log and inform the user
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.e("BLE", "GATT connection failed, status=$status")
+
+                val deviceName = gatt.device.name ?: "Unnamed"
+
+                // Notify user on the UI thread
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Lost connection to $deviceName",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+
+                // Close the connection to clean up resources
+                gatt.close()
+                return
+            }
+
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    // Successfully connected
+                    Log.i("BLE", "✅ Connected to GATT server. Discovering services...")
+
+                    val deviceName = gatt.device.name ?: "Unnamed"
+
+                    // Show toast to indicate connection
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Connected to $deviceName",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+
+                    // Update UI state on the main thread
+                    runOnUiThread {
+                        connectedDeviceName = deviceName
+                        showDataScreen = true // Trigger screen change to data display
+                    }
+
+                    // Start discovering services on the GATT server
+                    gatt.discoverServices()
+                }
+
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    // Device got disconnected
+                    Log.w("BLE", "Disconnected from GATT server")
+
+                    val deviceName = gatt.device.name ?: "Unnamed"
+
+                    // Notify user of disconnection
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "❌ Disconnected from $deviceName",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+
+                else -> {
+                    // Unknown state encountered
+                    Log.w("BLE", "⚠️ Unknown connection state: $newState")
+                }
+            }
+        }
+
+
+
+        // Callback invoked when a notification or indication is received from a characteristic
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            // Log the UUID of the characteristic and the raw byte values received
+            Log.i(
+                "BLE",
+                "📩 Notification received: ${characteristic.uuid}, value=${characteristic.value?.joinToString()}"
+            )
+        }
+
+
+
+        // Callback invoked after writing a descriptor (e.g., the CCCD)
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            // Log what was written and the status code returned by the stack
+            Log.i("BLE", "📝 onDescriptorWrite: UUID=${descriptor.uuid}, status=$status")
+
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                // Success: notifications/indications are now enabled or the descriptor update succeeded
+                Log.i("BLE", "✅ CCCD descriptor written successfully")
+            } else {
+                // Failure: handle retry logic or inform the user if necessary
+                Log.e("BLE", "❌ Descriptor write failed")
+            }
+        }
+
+
+
+        // Called when BLE services have been discovered on the connected device
+        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            super.onServicesDiscovered(gatt, status)
+
+            // Check if service discovery was successful
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w("BLE", "❌ Service discovery failed: $status")
+                return
+            }
+
+            // Look for the Heart Rate Service (UUID: 180D)
+            val hrService = gatt.getService(UUID.fromString("0000180D-0000-1000-8000-00805f9b34fb"))
+            if (hrService == null) {
+                Log.e("BLE", "Heart Rate service not found")
+                return
+            }
+
+            // Look for the Heart Rate Measurement characteristic (UUID: 2A37)
+            val hrMeas = hrService.getCharacteristic(UUID.fromString("00002A37-0000-1000-8000-00805f9b34fb"))
+            if (hrMeas == null) {
+                Log.e("BLE", "Heart Rate Measurement characteristic not found")
+                return
+            }
+
+            // Log characteristic properties (e.g., NOTIFY, READ, etc.)
+            Log.i("BLE", "📡 Properties: ${hrMeas.properties}")
+
+            // Check if the characteristic supports notifications
+            val supportsNotify = hrMeas.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+            Log.i("BLE", if (supportsNotify) "✅ Supports NOTIFY" else "Does NOT support NOTIFY")
+
+            // Enable notifications on the client side
+            val clientOk = gatt.setCharacteristicNotification(hrMeas, true)
+            Log.i("BLE", "➡ setCharacteristicNotification result: $clientOk")
+
+            // Access the CCCD (Client Characteristic Configuration Descriptor)
+            val cccd = hrMeas.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
+            if (cccd != null) {
+                // Request the descriptor to enable indications (or notifications)
+                cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                val success = gatt.writeDescriptor(cccd)
+                Log.i("BLE", if (success) "✅ CCCD write initiated" else "CCCD write failed to initiate")
+            } else {
+                Log.e("BLE", "CCCD descriptor missing")
+            }
+
+            // Log success
+            Log.i("BLE", "onServicesDiscovered: HR notifications configured")
+        }
+
+    }
+
+
+
+    // Function to initiate a BLE connection to a device by its MAC address
+    private fun connectToDevice(address: String) {
+        // Check for BLUETOOTH_CONNECT permission before attempting connection
+        val hasConnectPermission = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasConnectPermission) {
+            // Log error and notify user if permission is missing
+            Log.e("BLE", "Missing BLUETOOTH_CONNECT permission")
+            Toast.makeText(this, "Permission denied for connecting", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Stop BLE scanning before starting a new connection
+        stopBleScan()
+
+        // Retrieve the Bluetooth device by its address
+        val device = bluetoothAdapter.getRemoteDevice(address)
+
+        // Connect to the device using GATT (autoConnect = true)
+        bluetoothGatt = device.connectGatt(this, true, gattCallback)
+
+        // Log and notify that connection is in progress
+        Log.d("BLE", "Connecting to device: $address")
+        Toast.makeText(this, "Connecting to $address", Toast.LENGTH_SHORT).show()
+    }
+
+
+
     // This composable function displays a welcome screen with a fade-in and zoom-in animation.
-// It shows the app title and subtitle at launch, then transitions to the main screen.
+    // It shows the app title and subtitle at launch, then transitions to the main screen.
     @Composable
     private fun WelcomeScreen(onAnimationFinished: () -> Unit) {
         // State variable that controls when to start the animations
@@ -392,50 +548,157 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+
+
     // Composable UI function that displays a labeled toggle switch for BLE scanning
     @Composable
     fun BleScanToggle(
-        isScanning: Boolean, // Current scan state (true = scanning, false = not scanning)
-        onToggle: (Boolean) -> Unit // Callback when the switch is toggled
+        isScanning: Boolean,                // Current scan state (true = scanning, false = not scanning)
+        onToggle: (Boolean) -> Unit         // Callback when the switch is toggled
     ) {
-        // Horizontal row layout that contains the label and switch
+        // Horizontal row layout containing the label and the switch
         Row(
             modifier = Modifier
-                .fillMaxWidth() // Make the row span the full width of the screen
-                .padding(horizontal = 16.dp, vertical = 12.dp), // Add padding on the sides and top/bottom
-            verticalAlignment = Alignment.CenterVertically, // Vertically center the items in the row
-            horizontalArrangement = Arrangement.SpaceBetween // Push label and switch to opposite ends
+                .fillMaxWidth()            // Span the full width of the screen
+                .padding(
+                    horizontal = 16.dp,
+                    vertical = 12.dp
+                ),                         // Add spacing around the row
+            verticalAlignment = Alignment.CenterVertically,       // Align items vertically centered
+            horizontalArrangement = Arrangement.SpaceBetween       // Place label and switch on opposite ends
         ) {
             // Text label that reflects the current scanning status
             Text(
-                text = if (isScanning) "Scanning Enabled" else "Scan Disabled", // Dynamic label
-                fontSize = 20.sp, // Font size for the label
-                color = if (isScanning) Color(0xFF3F51B5) else Color.Gray // Color changes based on state
+                text = if (isScanning) "Scanning Enabled" else "Scan Disabled", // Dynamic label based on state
+                fontSize = 20.sp,                                               // Medium-large font
+                color = if (isScanning) Color(0xFF3F51B5) else Color.Gray       // Color reflects active/inactive state
             )
 
-            // Switch that controls scanning; checked = scanning
+            // Switch that toggles BLE scanning
             Switch(
-                checked = isScanning, // Bind the switch to the current scan state
-                onCheckedChange = onToggle // Trigger the callback when the user toggles it
+                checked = isScanning,       // Current state of the switch
+                onCheckedChange = onToggle  // Notify parent when toggled
             )
         }
     }
 
+
+
     // Composable UI function that renders a filter/search bar
     @Composable
     fun FilterBar(
-        query: String, // Current text entered in the search bar
-        onQueryChanged: (String) -> Unit // Callback to update the search text as the user types
+        query: String,                        // Current text entered in the search bar
+        onQueryChanged: (String) -> Unit     // Callback to update the search text as the user types
     ) {
-        // An outlined text input field with a label
-        androidx.compose.material3.OutlinedTextField(
-            value = query, // Bind the current input value to the field
-            onValueChange = onQueryChanged, // Call this whenever the user types
-            label = { Text("Filter devices...") }, // Label shown inside the input field
+        // Outlined text input field with a label and full-width styling
+        OutlinedTextField(
+            value = query,                   // Bind the current input value to the field
+            onValueChange = onQueryChanged, // Update search text on each keystroke
+            label = { Text("Filter devices...") }, // Input label shown when field is focused or empty
             modifier = Modifier
-                .fillMaxWidth() // Make the input field span the full width
-                .padding(horizontal = 16.dp) // Add horizontal padding to separate from screen edge
+                .fillMaxWidth()             // Input spans the entire screen width
+                .padding(horizontal = 16.dp) // Margin from screen edges
         )
     }
 
+
+
+    // Composable function that shows the BLE scanner UI
+    @Composable
+    fun MainScannerScreen() {
+        // Main layout column with padding and full screen height
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            // Scan toggle button (start/stop scanning)
+            BleScanToggle(isScanning = isScanning) { toggled ->
+                isScanning = toggled
+                if (toggled) {
+                    scannedDevices.clear() // Clear previous scan results
+                    startBleScan()         // Begin scanning
+                } else {
+                    stopBleScan()          // Stop scanning
+                    scannedDevices.clear() // Clear list after stopping
+                }
+            }
+
+            // Search/filter bar to refine displayed devices
+            FilterBar(
+                query = searchQuery,
+                onQueryChanged = { searchQuery = it }
+            )
+
+            // List of scanned devices that match the search query
+            LazyColumn {
+                val filteredDevices = scannedDevices.filter {
+                    it.contains(searchQuery, ignoreCase = true)
+                }
+
+                items(filteredDevices) { deviceInfo ->
+                    Text(
+                        text = deviceInfo, // Show device info (e.g., name [MAC])
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier
+                            .padding(16.dp)
+                            .clickable {
+                                // Extract MAC address and device name
+                                val address = deviceInfo.substringAfter("[").substringBefore("]")
+                                val name = deviceInfo.substringBefore(" [")
+
+                                // Connect and save connected device name
+                                connectToDevice(address)
+                                connectedDeviceName = name
+                            }
+                    )
+                }
+            }
+        }
+    }
+
+
+
+    // Composable function to display data after connecting to a BLE device
+    @Composable
+    fun DataDisplayScreen(deviceName: String) {
+        // Controls visibility for fade-in animation
+        var visible by remember { mutableStateOf(false) }
+
+        // Alpha animation: fades in from 0 to 1 over 1 second
+        val alpha by animateFloatAsState(
+            targetValue = if (visible) 1f else 0f,
+            animationSpec = tween(durationMillis = 1000),
+            label = "fadeIn"
+        )
+
+        // Triggers animation when composable is first launched
+        LaunchedEffect(Unit) {
+            visible = true
+        }
+
+        // Main layout container with padding, fade effect, and full screen size
+        Column(
+            modifier = Modifier
+                .fillMaxSize()       // Fill the entire screen
+                .alpha(alpha)        // Apply fade animation
+                .padding(24.dp)      // Outer padding for spacing
+        ) {
+            // Show connection status with device name
+            Text(
+                text = "Connected to $deviceName",
+                fontSize = 28.sp
+            )
+
+            // Spacer for visual separation
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Scrollable list of received data entries
+            LazyColumn {
+                items(receivedDataList) { data ->
+                    Text(text = data) // Display each data entry
+                }
+            }
+        }
+    }
 }
