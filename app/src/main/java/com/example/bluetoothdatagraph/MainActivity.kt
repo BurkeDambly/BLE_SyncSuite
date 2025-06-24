@@ -83,6 +83,33 @@ import java.util.UUID
 
 // --- Main App Logic Starts Here ---
 
+// Simple data class to represent each characteristic and its service
+data class CharacteristicInfo(
+    val serviceUuid: UUID,
+    val serviceName: String,
+    val charUuid: UUID,
+    val charName: String,
+    val properties: String
+)
+
+
+// Common BLE Service and Characteristic UUIDs with names
+val standardServiceNames = mapOf(
+    UUID.fromString("00001800-0000-1000-8000-00805f9b34fb") to "Generic Access",
+    UUID.fromString("00001801-0000-1000-8000-00805f9b34fb") to "Generic Attribute",
+    UUID.fromString("0000180D-0000-1000-8000-00805f9b34fb") to "Heart Rate",
+    UUID.fromString("0000180F-0000-1000-8000-00805f9b34fb") to "Battery Service"
+)
+
+val standardCharacteristicNames = mapOf(
+    UUID.fromString("00002A00-0000-1000-8000-00805f9b34fb") to "Device Name",
+    UUID.fromString("00002A01-0000-1000-8000-00805f9b34fb") to "Appearance",
+    UUID.fromString("00002A37-0000-1000-8000-00805f9b34fb") to "Heart Rate Measurement",
+    UUID.fromString("00002A38-0000-1000-8000-00805f9b34fb") to "Body Sensor Location",
+    UUID.fromString("00002A19-0000-1000-8000-00805f9b34fb") to "Battery Level"
+)
+
+// Main logic
 class MainActivity : ComponentActivity() {
 
     // This is a relative list that updates the UI when modified.
@@ -109,12 +136,20 @@ class MainActivity : ComponentActivity() {
 
     // Used to move into the graphing screen
     private var showDataScreen by mutableStateOf(false)
+    private var showGraphScreen by mutableStateOf(false)
 
     // Signals when the device connects
     private var connectedDeviceName by mutableStateOf("")
 
     // The data coming from the device
     private val receivedDataList = mutableStateListOf<String>()
+
+    // Holds the list of all discovered characteristics for UI display
+    private val characteristicInfoList = mutableStateListOf<CharacteristicInfo>()
+
+    // Track the characteristic to graph
+    private var graphCharUuid: UUID? = null
+    private var graphServiceUuid: UUID? = null
 
     // This is a list of all the permissions we want to request from the user at runtime.
     // Android doesn't grant these automatically; the user must approve them.
@@ -161,9 +196,8 @@ class MainActivity : ComponentActivity() {
             BluetoothDataGraphTheme {
                 Surface(color = MaterialTheme.colorScheme.background) {
                     when {
-                        showWelcomeScreen -> WelcomeScreen {
-                            showWelcomeScreen = false
-                        }
+                        showWelcomeScreen -> WelcomeScreen { showWelcomeScreen = false }
+                        showGraphScreen -> GraphScreen()
                         showDataScreen -> DataDisplayScreen(connectedDeviceName)
                         else -> MainScannerScreen()
                     }
@@ -371,16 +405,26 @@ class MainActivity : ComponentActivity() {
 
 
 
-        // Callback invoked when a notification or indication is received from a characteristic
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            // Log the UUID of the characteristic and the raw byte values received
-            Log.i(
-                "BLE",
-                "📩 Notification received: ${characteristic.uuid}, value=${characteristic.value?.joinToString()}"
-            )
+            val uuid = characteristic.uuid
+
+            // Only graph data if this is the subscribed graph characteristic
+            if (uuid == graphCharUuid) {
+                val dataValue = characteristic.value?.joinToString(separator = " ") { it.toUByte().toString() }
+                if (dataValue != null) {
+                    Log.i("BLE", "📈 Data for Graph: $dataValue")
+
+                    // Update the live data list for graphing
+                    runOnUiThread {
+                        receivedDataList.add(dataValue)
+                    }
+                }
+            } else {
+                Log.i("BLE", "📩 Notification from other characteristic: $uuid")
+            }
         }
 
 
@@ -414,6 +458,38 @@ class MainActivity : ComponentActivity() {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w("BLE", "❌ Service discovery failed: $status")
                 return
+            }
+
+            // Clear previous entries before adding new ones
+            characteristicInfoList.clear()
+
+            // Loop through all discovered services
+            for (service in gatt.services) {
+                Log.i("BLE", "🧩 Service UUID: ${service.uuid}")
+
+                // For each service, loop through its characteristics
+                for (characteristic in service.characteristics) {
+                    val props = characteristic.properties
+                    val propsList = mutableListOf<String>().apply {
+                        if (props and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("READ")
+                        if (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("WRITE")
+                        if (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("NOTIFY")
+                        if (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("INDICATE")
+                    }.joinToString()
+
+                    Log.i(
+                        "BLE",
+                        "  ↳ Characteristic UUID: ${characteristic.uuid} | Properties: $propsList"
+                    )
+                    // Add to list for UI
+                    // Lookup human-readable names or fall back to UUID string
+                    val serviceName = standardServiceNames[service.uuid] ?: "Unknown Service"
+                    val charName = standardCharacteristicNames[characteristic.uuid] ?: "Unknown Characteristic"
+
+                    characteristicInfoList.add(
+                        CharacteristicInfo(service.uuid, serviceName, characteristic.uuid, charName, propsList)
+                    )
+                }
             }
 
             // Look for the Heart Rate Service (UUID: 180D)
@@ -695,10 +771,118 @@ class MainActivity : ComponentActivity() {
 
             // Scrollable list of received data entries
             LazyColumn {
-                items(receivedDataList) { data ->
-                    Text(text = data) // Display each data entry
+                items(characteristicInfoList) { info ->
+                    val isIndicatable = "INDICATE" in info.properties
+
+                    Text(
+                        text = "Service: ${info.serviceName} (${info.serviceUuid})\n↳ Char: ${info.charName} (${info.charUuid})\n   Props: ${info.properties}",
+                        fontSize = 14.sp,
+                        color = if (isIndicatable) Color(0xFF1E88E5) else Color.Gray,
+                        modifier = Modifier
+                            .padding(bottom = 12.dp)
+                            .clickable(enabled = isIndicatable) {
+                                graphCharUuid = info.charUuid
+                                graphServiceUuid = info.serviceUuid
+
+                                val hasPermission = ContextCompat.checkSelfPermission(
+                                    this@MainActivity,
+                                    Manifest.permission.BLUETOOTH_CONNECT
+                                ) == PackageManager.PERMISSION_GRANTED
+
+                                if (hasPermission) {
+                                    enableIndicationAndGraph(info.charUuid, info.serviceUuid)
+                                } else {
+                                    Toast.makeText(this@MainActivity, "Permission denied for indication", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp)) // Spacer before new section
+
+            Text(
+                text = "Discovered Characteristics:",
+                fontSize = 20.sp,
+                color = Color(0xFF3F51B5)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            LazyColumn {
+                items(characteristicInfoList) { info ->
+                    Text(
+                        text = "Service: ${info.serviceName} (${info.serviceUuid})\n↳ Char: ${info.charName} (${info.charUuid})\n   Props: ${info.properties}",
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
                 }
             }
         }
     }
+
+
+
+    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    private fun enableIndicationAndGraph(charUuid: UUID, serviceUuid: UUID) {
+        // Check for required permission before doing anything
+        val hasConnectPermission = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasConnectPermission) {
+            Log.e("BLE", "❌ BLUETOOTH_CONNECT permission not granted")
+            Toast.makeText(this, "Missing permission for indication", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        bluetoothGatt?.let { gatt ->
+            val service = gatt.getService(serviceUuid)
+            val char = service?.getCharacteristic(charUuid)
+
+            if (char != null) {
+                val ok = gatt.setCharacteristicNotification(char, true)
+                Log.i("BLE", if (ok) "🔔 setCharacteristicNotification success" else "❌ setCharacteristicNotification failed")
+
+                val cccd = char.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
+                if (cccd != null) {
+                    cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                    val started = gatt.writeDescriptor(cccd)
+                    Log.i("BLE", if (started) "📡 CCCD indication started" else "❌ CCCD indication failed")
+                } else {
+                    Log.e("BLE", "❌ CCCD descriptor not found")
+                }
+            } else {
+                Log.e("BLE", "❌ Characteristic not found in service")
+            }
+
+            // Navigate to graph screen
+            runOnUiThread {
+                showDataScreen = false
+                showGraphScreen = true
+            }
+        }
+    }
+
+
+
+    @Composable
+    fun GraphScreen() {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp)
+        ) {
+            Text("📈 Graphing characteristic data...", fontSize = 24.sp)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            LazyColumn {
+                items(receivedDataList) { entry ->
+                    Text("Data: $entry")
+                }
+            }
+        }
+    }
+
 }
