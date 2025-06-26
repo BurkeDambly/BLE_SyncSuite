@@ -69,16 +69,27 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import androidx.compose.animation.Crossfade // Make sure this is imported
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 // --- Main App Logic Starts Here ---
@@ -108,6 +119,8 @@ val standardCharacteristicNames = mapOf(
     UUID.fromString("00002A38-0000-1000-8000-00805f9b34fb") to "Body Sensor Location",
     UUID.fromString("00002A19-0000-1000-8000-00805f9b34fb") to "Battery Level"
 )
+
+val readValues = mutableStateMapOf<UUID, String>()
 
 // Main logic
 class MainActivity : ComponentActivity() {
@@ -477,59 +490,38 @@ class MainActivity : ComponentActivity() {
                         if (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("INDICATE")
                     }.joinToString()
 
-                    Log.i(
-                        "BLE",
-                        "  ↳ Characteristic UUID: ${characteristic.uuid} | Properties: $propsList"
-                    )
-                    // Add to list for UI
-                    // Lookup human-readable names or fall back to UUID string
                     val serviceName = standardServiceNames[service.uuid] ?: "Unknown Service"
                     val charName = standardCharacteristicNames[characteristic.uuid] ?: "Unknown Characteristic"
 
-                    characteristicInfoList.add(
-                        CharacteristicInfo(service.uuid, serviceName, characteristic.uuid, charName, propsList)
-                    )
+                    val info = CharacteristicInfo(service.uuid, serviceName, characteristic.uuid, charName, propsList)
+
+                    // ✅ Only add if it's not already in the list
+                    if (!characteristicInfoList.any {
+                            it.charUuid == info.charUuid && it.serviceUuid == info.serviceUuid
+                        }) {
+                        characteristicInfoList.add(info)
+                    }
                 }
             }
 
-            // Look for the Heart Rate Service (UUID: 180D)
-            val hrService = gatt.getService(UUID.fromString("0000180D-0000-1000-8000-00805f9b34fb"))
-            if (hrService == null) {
-                Log.e("BLE", "Heart Rate service not found")
-                return
-            }
+        }
 
-            // Look for the Heart Rate Measurement characteristic (UUID: 2A37)
-            val hrMeas = hrService.getCharacteristic(UUID.fromString("00002A37-0000-1000-8000-00805f9b34fb"))
-            if (hrMeas == null) {
-                Log.e("BLE", "Heart Rate Measurement characteristic not found")
-                return
-            }
 
-            // Log characteristic properties (e.g., NOTIFY, READ, etc.)
-            Log.i("BLE", "📡 Properties: ${hrMeas.properties}")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                val value = characteristic.value?.joinToString(" ") { it.toUByte().toString() } ?: "null"
 
-            // Check if the characteristic supports notifications
-            val supportsNotify = hrMeas.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
-            Log.i("BLE", if (supportsNotify) "✅ Supports NOTIFY" else "Does NOT support NOTIFY")
+                // 👇 this must update the same map the Composable sees
+                readValues[characteristic.uuid] = value
 
-            // Enable notifications on the client side
-            val clientOk = gatt.setCharacteristicNotification(hrMeas, true)
-            Log.i("BLE", "➡ setCharacteristicNotification result: $clientOk")
-
-            // Access the CCCD (Client Characteristic Configuration Descriptor)
-            val cccd = hrMeas.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
-            if (cccd != null) {
-                // Request the descriptor to enable indications (or notifications)
-                cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                val success = gatt.writeDescriptor(cccd)
-                Log.i("BLE", if (success) "✅ CCCD write initiated" else "CCCD write failed to initiate")
+                Log.i("BLE", "✅ Read from ${characteristic.uuid}: $value")
             } else {
-                Log.e("BLE", "CCCD descriptor missing")
+                Log.w("BLE", "❌ Failed to read characteristic ${characteristic.uuid}, status: $status")
             }
-
-            // Log success
-            Log.i("BLE", "onServicesDiscovered: HR notifications configured")
         }
 
     }
@@ -637,9 +629,11 @@ class MainActivity : ComponentActivity() {
             modifier = Modifier
                 .fillMaxWidth()            // Span the full width of the screen
                 .padding(
-                    horizontal = 16.dp,
-                    vertical = 12.dp
-                ),                         // Add spacing around the row
+                    start = 24.dp,
+                    end = 24.dp,
+                    top = 36.dp,
+                    bottom = 12.dp // ≈ 1/4 inch
+                ),                        // Add spacing around the row
             verticalAlignment = Alignment.CenterVertically,       // Align items vertically centered
             horizontalArrangement = Arrangement.SpaceBetween       // Place label and switch on opposite ends
         ) {
@@ -686,7 +680,12 @@ class MainActivity : ComponentActivity() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(16.dp)
+                .padding(
+                    start = 24.dp,
+                    end = 24.dp,
+                    top = 12.dp,
+                    bottom = 48.dp // ≈ 1/4 inch
+                )
         ) {
             // Scan toggle button (start/stop scanning)
             BleScanToggle(isScanning = isScanning) { toggled ->
@@ -735,87 +734,129 @@ class MainActivity : ComponentActivity() {
 
 
 
-    // Composable function to display data after connecting to a BLE device
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     fun DataDisplayScreen(deviceName: String) {
-        // Controls visibility for fade-in animation
+        // For fade-in animation
         var visible by remember { mutableStateOf(false) }
 
-        // Alpha animation: fades in from 0 to 1 over 1 second
+        // Track which characteristic is expanded
+        var expandedCharUuid by remember { mutableStateOf<UUID?>(null) }
+
+        val context = LocalContext.current
+        val listState = rememberLazyListState()
+
+        val pollingJobs = remember { mutableStateMapOf<UUID, Job>() }
+        val mainScope = rememberCoroutineScope()
+
+
+        // Fade-in animation
         val alpha by animateFloatAsState(
             targetValue = if (visible) 1f else 0f,
             animationSpec = tween(durationMillis = 1000),
             label = "fadeIn"
         )
 
-        // Triggers animation when composable is first launched
         LaunchedEffect(Unit) {
             visible = true
+            listState.scrollToItem(0) // Optional: scroll to top when screen launches
         }
 
-        // Main layout container with padding, fade effect, and full screen size
+        // Screen layout
         Column(
             modifier = Modifier
-                .fillMaxSize()       // Fill the entire screen
-                .alpha(alpha)        // Apply fade animation
-                .padding(24.dp)      // Outer padding for spacing
+                .fillMaxSize()
+                .alpha(alpha)
+                .padding(
+                    start = 24.dp,
+                    end = 24.dp,
+                    top = 36.dp,
+                    bottom = 48.dp
+                )
         ) {
-            // Show connection status with device name
-            Text(
-                text = "Connected to $deviceName",
-                fontSize = 28.sp
-            )
-
-            // Spacer for visual separation
+            Text("Connected to $deviceName", fontSize = 28.sp)
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Scrollable list of received data entries
-            LazyColumn {
+            // Single LazyColumn for all characteristics
+            LazyColumn(state = listState) {
                 items(characteristicInfoList) { info ->
-                    val isIndicatable = "INDICATE" in info.properties
+                    val isReadable = "READ" in info.properties
+                    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+                    val coroutineScope = rememberCoroutineScope()
 
-                    Text(
-                        text = "Service: ${info.serviceName} (${info.serviceUuid})\n↳ Char: ${info.charName} (${info.charUuid})\n   Props: ${info.properties}",
-                        fontSize = 14.sp,
-                        color = if (isIndicatable) Color(0xFF1E88E5) else Color.Gray,
+                    Column(
                         modifier = Modifier
-                            .padding(bottom = 12.dp)
-                            .clickable(enabled = isIndicatable) {
-                                graphCharUuid = info.charUuid
-                                graphServiceUuid = info.serviceUuid
-
-                                val hasPermission = ContextCompat.checkSelfPermission(
-                                    this@MainActivity,
-                                    Manifest.permission.BLUETOOTH_CONNECT
-                                ) == PackageManager.PERMISSION_GRANTED
-
-                                if (hasPermission) {
-                                    enableIndicationAndGraph(info.charUuid, info.serviceUuid)
-                                } else {
-                                    Toast.makeText(this@MainActivity, "Permission denied for indication", Toast.LENGTH_SHORT).show()
+                            .fillMaxWidth()
+                            .bringIntoViewRequester(bringIntoViewRequester)
+                            .clickable(enabled = isReadable) {
+                                expandedCharUuid = if (expandedCharUuid == info.charUuid) null else info.charUuid
+                                coroutineScope.launch {
+                                    bringIntoViewRequester.bringIntoView()
                                 }
                             }
-                    )
-                }
-            }
+                            .padding(16.dp)
+                    ) {
+                        Text("Characteristic: ${info.charName}")
+                        Text("Properties: ${info.properties}")
+                        Text("UUID: ${info.charUuid}", fontSize = 12.sp, color = Color.Gray)
 
-            Spacer(modifier = Modifier.height(24.dp)) // Spacer before new section
+                        if (expandedCharUuid == info.charUuid) {
+                            Column(modifier = Modifier.padding(top = 12.dp)) {
+                                Button(onClick = {
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
+                                        == PackageManager.PERMISSION_GRANTED
+                                    ) {
+                                        readCharacteristicOnce(info.charUuid, info.serviceUuid)
+                                    } else {
+                                        Toast.makeText(
+                                            context,
+                                            "Bluetooth permission not granted",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }) {
+                                    Text("Read")
+                                }
+                                Button(
+                                    onClick = {
+                                        // Stop if already polling
+                                        if (pollingJobs.containsKey(info.charUuid)) {
+                                            pollingJobs[info.charUuid]?.cancel()
+                                            pollingJobs.remove(info.charUuid)
+                                        } else {
+                                            // Start polling
+                                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
+                                                == PackageManager.PERMISSION_GRANTED
+                                            ) {
+                                                val job = mainScope.launch {
+                                                    while (isActive) {
+                                                        readCharacteristicOnce(info.charUuid, info.serviceUuid)
+                                                        delay(100) // 0.1 seconds
+                                                    }
+                                                }
+                                                pollingJobs[info.charUuid] = job
+                                            } else {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Bluetooth permission not granted",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Text(
+                                        if (pollingJobs.containsKey(info.charUuid)) "Stop Polling" else "Poll"
+                                    )
+                                }
 
-            Text(
-                text = "Discovered Characteristics:",
-                fontSize = 20.sp,
-                color = Color(0xFF3F51B5)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            LazyColumn {
-                items(characteristicInfoList) { info ->
-                    Text(
-                        text = "Service: ${info.serviceName} (${info.serviceUuid})\n↳ Char: ${info.charName} (${info.charUuid})\n   Props: ${info.properties}",
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
+                                Text(
+                                    "Last Value: ${readValues[info.charUuid] ?: "—"}",
+                                    fontSize = 14.sp
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -823,43 +864,18 @@ class MainActivity : ComponentActivity() {
 
 
 
+
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    private fun enableIndicationAndGraph(charUuid: UUID, serviceUuid: UUID) {
-        // Check for required permission before doing anything
-        val hasConnectPermission = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.BLUETOOTH_CONNECT
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (!hasConnectPermission) {
-            Log.e("BLE", "❌ BLUETOOTH_CONNECT permission not granted")
-            Toast.makeText(this, "Missing permission for indication", Toast.LENGTH_SHORT).show()
-            return
-        }
-
+    private fun readCharacteristicOnce(charUuid: UUID, serviceUuid: UUID) {
         bluetoothGatt?.let { gatt ->
             val service = gatt.getService(serviceUuid)
-            val char = service?.getCharacteristic(charUuid)
+            val characteristic = service?.getCharacteristic(charUuid)
 
-            if (char != null) {
-                val ok = gatt.setCharacteristicNotification(char, true)
-                Log.i("BLE", if (ok) "🔔 setCharacteristicNotification success" else "❌ setCharacteristicNotification failed")
-
-                val cccd = char.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
-                if (cccd != null) {
-                    cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                    val started = gatt.writeDescriptor(cccd)
-                    Log.i("BLE", if (started) "📡 CCCD indication started" else "❌ CCCD indication failed")
-                } else {
-                    Log.e("BLE", "❌ CCCD descriptor not found")
-                }
+            if (characteristic != null) {
+                val success = gatt.readCharacteristic(characteristic)
+                Log.i("BLE", if (success) "📖 Read initiated" else "❌ Read failed to initiate")
             } else {
-                Log.e("BLE", "❌ Characteristic not found in service")
-            }
-
-            // Navigate to graph screen
-            runOnUiThread {
-                showDataScreen = false
-                showGraphScreen = true
+                Log.e("BLE", "❌ Characteristic not found")
             }
         }
     }
