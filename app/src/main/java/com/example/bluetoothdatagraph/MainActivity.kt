@@ -124,6 +124,11 @@ val standardCharacteristicNames = mapOf(
 
 val readValues = mutableStateMapOf<UUID, String>()
 
+// ▶︎ ADD — Nordic UART service/characteristics
+private val NUS_SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+private val NUS_TX_UUID      = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")  // notify
+
+
 // Main logic
 class MainActivity : ComponentActivity() {
 
@@ -158,6 +163,7 @@ class MainActivity : ComponentActivity() {
 
     // The data coming from the device
     private val receivedDataList = mutableStateListOf<String>()
+    private val bleBuffer = StringBuilder()
 
     // Holds the list of all discovered characteristics for UI display
     private val characteristicInfoList = mutableStateListOf<CharacteristicInfo>()
@@ -395,6 +401,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     // Start discovering services on the GATT server
+                    gatt.requestMtu(247)
                     gatt.discoverServices()
                 }
 
@@ -427,26 +434,25 @@ class MainActivity : ComponentActivity() {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            val uuid = characteristic.uuid
+            // ▶︎ append this BLE fragment to the rolling buffer
+            val chunk = characteristic.value?.toString(Charsets.UTF_8) ?: return
+            bleBuffer.append(chunk)
 
-            val rawData = characteristic.value?.toString(Charsets.UTF_8)?.trim()
-            Log.d("BLE_RAW_PACKET", rawData ?: "NULL")
+            // ▶︎ process every complete line we now have
+            while (true) {
+                val nl = bleBuffer.indexOf("\n")
+                if (nl == -1) break                        // still waiting for a newline
 
-            // Only graph data if this is the subscribed graph characteristic
-            if (uuid == graphCharUuid) {
-                val dataValue = characteristic.value?.toString(Charsets.UTF_8)?.trim()
-                if (dataValue != null) {
-                    Log.i("BLE", "📈 Data for Graph: $dataValue")
+                val fullLine = bleBuffer.substring(0, nl).trim()
+                bleBuffer.delete(0, nl + 1)               // drop processed part
 
-                    // Update the live data list for graphing
-                    runOnUiThread {
-                        receivedDataList.add(dataValue)
-                    }
+                if (fullLine.isNotEmpty()) {
+                    Log.i("BLE_PACKET_FULL", fullLine)    // e.g. @A,EDA,123…,0.6789
+                    receivedDataList.add(fullLine)        // drives your graph/UI
                 }
-            } else {
-                Log.i("BLE", "📩 Notification from other characteristic: $uuid")
             }
         }
+
 
 
 
@@ -482,7 +488,18 @@ class MainActivity : ComponentActivity() {
             }
 
             // Clear previous entries before adding new ones
-            characteristicInfoList.clear()
+            gatt.getService(NUS_SERVICE_UUID)
+                ?.getCharacteristic(NUS_TX_UUID)
+                ?.let { tx ->
+                    gatt.setCharacteristicNotification(tx, true)
+                    tx.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805F9B34FB"))?.also { cccd ->
+                        cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        gatt.writeDescriptor(cccd)
+                    }
+                    graphCharUuid  = tx.uuid       // keeps your old logic happy
+                    graphServiceUuid = NUS_SERVICE_UUID
+                    Log.i("BLE", "✅ Subscribed to Nordic‑UART TX")
+                } ?: Log.e("BLE", "❌ Nordic‑UART TX characteristic not found")
 
             // Loop through all discovered services
             for (service in gatt.services) {
