@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.bluetoothdatagraph"
+    namespace = "com.example.ble_sync_suite_app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.bluetoothdatagraph"
+        applicationId = "com.example.ble_sync_suite_app"
         minSdk = 24
         targetSdk = 35
         versionCode = 1

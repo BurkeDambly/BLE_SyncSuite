@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "BluetoothDataGraph"
+rootProject.name = "ble_sync_suite_app"
 include(":app")
  

@@ -1,4 +1,4 @@
-package com.example.bluetoothdatagraph
+package com.example.ble_sync_suite_app
 
 import org.junit.Test
 
