@@ -18,13 +18,13 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.BluetoothDataGraph"
+        android:theme="@style/Theme.ble_sync_suite_app"
         tools:targetApi="31">
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.BluetoothDataGraph">
+            android:theme="@style/Theme.ble_sync_suite_app">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

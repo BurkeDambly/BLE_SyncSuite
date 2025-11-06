@@ -1,5 +1,5 @@
 // This defines the package name — it matches the folder structure and helps Android locate your code
-package com.example.bluetoothdatagraph
+package com.example.ble_sync_suite_app
 
 // --- Android System Imports ---
 
