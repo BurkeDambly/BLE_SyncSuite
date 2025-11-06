@@ -1,1 +1,1 @@
-
+BLE_SyncSuite is a modular framework for precise time synchronization across Bluetooth Low Energy (BLE) devices. It includes an Android app, white-box firmware tests, and black-box simulated commercial designs to achieve sub-millisecond alignment with standard BLE protocols and low power use.
