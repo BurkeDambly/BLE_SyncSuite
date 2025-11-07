@@ -1,4 +1,4 @@
-package com.example.bluetoothdatagraph.ui.theme
+package com.example.ble_sync_suite_app.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle

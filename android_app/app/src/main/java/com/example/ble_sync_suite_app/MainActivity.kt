@@ -23,7 +23,7 @@ import androidx.compose.material3.Surface // A container composable that fills t
 
 // --- App-Specific Theme Import ---
 
-import com.example.bluetoothdatagraph.ui.theme.BluetoothDataGraphTheme // Auto-generated theme from the new project wizard
+import com.example.ble_sync_suite_app.ui.theme.BleSyncSuiteTheme
 
 // --- Bluetooth Connection ---
 import android.bluetooth.BluetoothAdapter
@@ -39,6 +39,10 @@ import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.os.SystemClock
 import androidx.annotation.RequiresPermission
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -54,6 +58,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.material3.TextButton
 
 // --- Animations ---
 import androidx.compose.animation.core.animateFloatAsState
@@ -93,6 +107,10 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 import android.bluetooth.le.ScanSettings
 import android.bluetooth.BluetoothDevice
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlin.math.abs
+import java.util.Locale
 
 // --- Main App Logic Starts Here ---
 
@@ -139,6 +157,10 @@ class MainActivity : ComponentActivity() {
     // Keeps track of whether the welcome screen is currently showing.
     // Once the animation ends, we set this to false and show the scanner list.
     private var showWelcomeScreen by mutableStateOf(true)
+    private var showMainMenu by mutableStateOf(false)
+    private var showScannerScreen by mutableStateOf(false)
+    private var showAudioVisualizerScreen by mutableStateOf(false)
+    private var navigateToAudioWhenPermissionGranted = false
 
     // Holds a reference to the currently visible Toast message.
     // This allows us to cancel any existing Toast before showing a new one,
@@ -178,7 +200,8 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.BLUETOOTH_SCAN,          // Required to detect nearby Bluetooth LE devices (Android 12+)
         Manifest.permission.BLUETOOTH_CONNECT,       // Required to initiate BLE connections (Android 12+)
         Manifest.permission.ACCESS_FINE_LOCATION,    // Still needed for scanning on Android < 12
-        Manifest.permission.ACCESS_COARSE_LOCATION   // Provides compatibility with older phones
+        Manifest.permission.ACCESS_COARSE_LOCATION,  // Provides compatibility with older phones
+        Manifest.permission.RECORD_AUDIO             // Needed for live audio capture
     )
 
     // This will be used to start BLE scanning
@@ -202,9 +225,15 @@ class MainActivity : ComponentActivity() {
             if (denied) {
                 // Show a message if one or more permissions were not granted
                 Toast.makeText(this, "Some permissions were denied.", Toast.LENGTH_LONG).show()
+                navigateToAudioWhenPermissionGranted = false
             } else {
                 // All permissions granted — app is ready to scan/connect
                 Toast.makeText(this, "All permissions granted!", Toast.LENGTH_SHORT).show()
+                if (navigateToAudioWhenPermissionGranted) {
+                    showMainMenu = false
+                    showAudioVisualizerScreen = true
+                }
+                navigateToAudioWhenPermissionGranted = false
             }
         }
 
@@ -214,13 +243,67 @@ class MainActivity : ComponentActivity() {
 
         // Set up the UI using Jetpack Compose instead of XML layout
         setContent {
-            BluetoothDataGraphTheme {
+            BleSyncSuiteTheme {
                 Surface(color = MaterialTheme.colorScheme.background) {
                     when {
-                        showWelcomeScreen -> WelcomeScreen { showWelcomeScreen = false }
-                        showGraphScreen -> GraphScreen()
-                        showDataScreen -> DataDisplayScreen(connectedDeviceName)
-                        else -> MainScannerScreen()
+                        showWelcomeScreen -> WelcomeScreen {
+                            showWelcomeScreen = false
+                            showMainMenu = true
+                        }
+                        showAudioVisualizerScreen -> AudioVisualizerScreen(
+                            onBack = {
+                                showAudioVisualizerScreen = false
+                                showMainMenu = true
+                            }
+                        )
+                        showGraphScreen -> GraphScreen(
+                            onBack = { showGraphScreen = false }
+                        )
+                        showDataScreen -> DataDisplayScreen(
+                            deviceName = connectedDeviceName,
+                            onBack = {
+                                showDataScreen = false
+                                showGraphScreen = false
+                                stopBleScan()
+                                isScanning = false
+                                if (ContextCompat.checkSelfPermission(
+                                        this,
+                                        Manifest.permission.BLUETOOTH_CONNECT
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    bluetoothGatt?.disconnect()
+                                }
+                                bluetoothGatt?.close()
+                                bluetoothGatt = null
+                                showMainMenu = true
+                            }
+                        )
+                        showScannerScreen -> MainScannerScreen(
+                            onBack = {
+                                stopBleScan()
+                                isScanning = false
+                                showScannerScreen = false
+                                showMainMenu = true
+                            }
+                        )
+                        showMainMenu -> MainMenuScreen(
+                            onConnectToDevice = {
+                                showMainMenu = false
+                                showScannerScreen = true
+                            },
+                            onOpenAudioVisualizer = {
+                                openAudioVisualizerWithPermissionCheck()
+                            }
+                        )
+                        else -> MainMenuScreen(
+                            onConnectToDevice = {
+                                showMainMenu = false
+                                showScannerScreen = true
+                            },
+                            onOpenAudioVisualizer = {
+                                openAudioVisualizerWithPermissionCheck()
+                            }
+                        )
                     }
                 }
             }
@@ -260,6 +343,26 @@ class MainActivity : ComponentActivity() {
         } else {
             // Nothing to request — let the user know
             Toast.makeText(this, "All permissions already granted!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openAudioVisualizerWithPermissionCheck() {
+        val hasAudioPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasAudioPermission) {
+            showMainMenu = false
+            showAudioVisualizerScreen = true
+        } else {
+            navigateToAudioWhenPermissionGranted = true
+            permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+            Toast.makeText(
+                this,
+                "Microphone permission is required to open the audio visualizer.",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 
@@ -397,6 +500,7 @@ class MainActivity : ComponentActivity() {
                     // Update UI state on the main thread
                     runOnUiThread {
                         connectedDeviceName = deviceName
+                        showScannerScreen = false
                         showDataScreen = true // Trigger screen change to data display
                     }
 
@@ -418,7 +522,14 @@ class MainActivity : ComponentActivity() {
                             "❌ Disconnected from $deviceName",
                             Toast.LENGTH_SHORT
                         ).show()
+                        isScanning = false
+                        showDataScreen = false
+                        showGraphScreen = false
+                        showScannerScreen = false
+                        showMainMenu = true
                     }
+                    gatt.close()
+                    bluetoothGatt = null
                 }
 
                 else -> {
@@ -715,7 +826,7 @@ class MainActivity : ComponentActivity() {
 
     // Composable function that shows the BLE scanner UI
     @Composable
-    fun MainScannerScreen() {
+    fun MainScannerScreen(onBack: () -> Unit) {
         // Main layout column with padding and full screen height
         Column(
             modifier = Modifier
@@ -727,6 +838,10 @@ class MainActivity : ComponentActivity() {
                     bottom = 48.dp // ≈ 1/4 inch
                 )
         ) {
+            Button(onClick = onBack) {
+                Text("Back to Menu")
+            }
+            Spacer(modifier = Modifier.height(12.dp))
             // Scan toggle button (start/stop scanning)
             BleScanToggle(isScanning = isScanning) { toggled ->
                 isScanning = toggled
@@ -774,9 +889,270 @@ class MainActivity : ComponentActivity() {
 
 
 
+    @Composable
+    fun MainMenuScreen(
+        onConnectToDevice: () -> Unit,
+        onOpenAudioVisualizer: () -> Unit
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 32.dp, vertical = 48.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("BLE Sync Suite", fontSize = 36.sp, textAlign = TextAlign.Center)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Select what you want to do",
+                fontSize = 18.sp,
+                color = Color.Gray,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(48.dp))
+            Button(onClick = onConnectToDevice, modifier = Modifier.fillMaxWidth()) {
+                Text("Connect to Device")
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = onOpenAudioVisualizer, modifier = Modifier.fillMaxWidth()) {
+                Text("Audio Visualizer")
+            }
+        }
+    }
+
+
+    @Composable
+    fun AudioVisualizerScreen(onBack: () -> Unit) {
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        val hasAudioPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        var isRecording by remember { mutableStateOf(false) }
+        var elapsedMicros by remember { mutableStateOf(0L) }
+        var audioRecord by remember { mutableStateOf<AudioRecord?>(null) }
+        val waveformSamples = remember { mutableStateListOf<Float>() }
+        var recordingJob by remember { mutableStateOf<Job?>(null) }
+        var startTimeNanos by remember { mutableStateOf(0L) }
+
+        fun stopRecording() {
+            isRecording = false
+            recordingJob?.cancel()
+            recordingJob = null
+            audioRecord?.run {
+                try {
+                    stop()
+                } catch (_: IllegalStateException) {
+                    // already stopped
+                }
+                release()
+            }
+            audioRecord = null
+        }
+
+        DisposableEffect(Unit) {
+            onDispose {
+                stopRecording()
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 32.dp),
+            verticalArrangement = Arrangement.Top,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = {
+                    stopRecording()
+                    onBack()
+                }) {
+                    Text("Back")
+                }
+                Text("Audio Visualizer", fontSize = 28.sp)
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = if (hasAudioPermission) "Tap start to capture microphone audio." else "Microphone permission is required.",
+                fontSize = 16.sp,
+                color = if (hasAudioPermission) Color.Gray else Color(0xFFD32F2F),
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF101820))
+                    .padding(12.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    drawRect(Color(0xFF101820))
+
+                    if (waveformSamples.isNotEmpty()) {
+                        val path = Path()
+                        val mirrorPath = Path()
+                        val widthStep = size.width / (waveformSamples.size - 1).coerceAtLeast(1)
+                        waveformSamples.forEachIndexed { index, amplitude ->
+                            val x = index * widthStep
+                            val y = size.height / 2f - (amplitude * size.height / 2f)
+                            val mirroredY = size.height / 2f + (amplitude * size.height / 2f)
+                            if (index == 0) {
+                                path.moveTo(x, y)
+                                mirrorPath.moveTo(x, mirroredY)
+                            } else {
+                                path.lineTo(x, y)
+                                mirrorPath.lineTo(x, mirroredY)
+                            }
+                        }
+                        drawPath(path = path, color = Color(0xFF64FFDA), style = Stroke(width = 3f))
+                        drawPath(path = mirrorPath, color = Color(0xFF64FFDA), style = Stroke(width = 3f))
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            val elapsedText = if (isRecording) {
+                String.format(Locale.US, "Elapsed: %,d us", elapsedMicros)
+            } else {
+                "Elapsed: 0 us"
+            }
+
+            Text(text = elapsedText, fontSize = 20.sp)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Button(
+                    enabled = hasAudioPermission && !isRecording,
+                    onClick = {
+                        if (!hasAudioPermission) {
+                            Toast.makeText(context, "Microphone permission denied", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+
+                        val sampleRate = 44100
+                        val minBuffer = AudioRecord.getMinBufferSize(
+                            sampleRate,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT
+                        )
+
+                        if (minBuffer <= 0) {
+                            Toast.makeText(context, "Unsupported audio configuration", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+
+                        val bufferSize = minBuffer.coerceAtLeast(sampleRate / 10)
+
+                        val record = AudioRecord.Builder()
+                            .setAudioSource(MediaRecorder.AudioSource.MIC)
+                            .setAudioFormat(
+                                AudioFormat.Builder()
+                                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                    .setSampleRate(sampleRate)
+                                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                                    .build()
+                            )
+                            .setBufferSizeInBytes(bufferSize * 2)
+                            .build()
+
+                        audioRecord = record
+
+                        try {
+                            record.startRecording()
+                        } catch (e: IllegalStateException) {
+                            record.release()
+                            audioRecord = null
+                            Toast.makeText(context, "Unable to start recording", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+
+                        waveformSamples.clear()
+                        startTimeNanos = SystemClock.elapsedRealtimeNanos()
+                        elapsedMicros = 0L
+                        isRecording = true
+
+                        recordingJob = scope.launch(Dispatchers.Default) {
+                            val buffer = ShortArray(bufferSize)
+                            while (isActive && isRecording) {
+                                val read = try {
+                                    record.read(buffer, 0, buffer.size)
+                                } catch (_: IllegalStateException) {
+                                    break
+                                }
+
+                                if (read > 0) {
+                                    val peak = (0 until read).maxOf { index ->
+                                        abs(buffer[index].toInt())
+                                    }.toFloat()
+
+                                    val normalized = (peak / Short.MAX_VALUE.toFloat()).coerceIn(0f, 1f)
+                                    val micros = (SystemClock.elapsedRealtimeNanos() - startTimeNanos) / 1000L
+
+                                    withContext(Dispatchers.Main) {
+                                        elapsedMicros = micros
+                                        waveformSamples.add(normalized)
+                                        val maxSamples = 240
+                                        if (waveformSamples.size > maxSamples) {
+                                            repeat(waveformSamples.size - maxSamples) {
+                                                if (waveformSamples.isNotEmpty()) {
+                                                    waveformSamples.removeAt(0)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            withContext(Dispatchers.Main) {
+                                stopRecording()
+                            }
+                        }
+                    }
+                ) {
+                    Text("Start")
+                }
+
+                Button(
+                    enabled = isRecording,
+                    onClick = {
+                        stopRecording()
+                        elapsedMicros = 0L
+                    }
+                ) {
+                    Text("Stop")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text(
+                text = if (isRecording) "Recording at 44.1 kHz (mono)" else "Recorder idle",
+                fontSize = 14.sp,
+                color = Color.Gray
+            )
+        }
+    }
+
+
+
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
-    fun DataDisplayScreen(deviceName: String) {
+    fun DataDisplayScreen(deviceName: String, onBack: () -> Unit) {
         // For fade-in animation
         var visible by remember { mutableStateOf(false) }
 
@@ -787,7 +1163,6 @@ class MainActivity : ComponentActivity() {
         val listState = rememberLazyListState()
 
         val pollingJobs = remember { mutableStateMapOf<UUID, Job>() }
-        val mainScope = rememberCoroutineScope()
 
 
         // Fade-in animation
@@ -814,7 +1189,23 @@ class MainActivity : ComponentActivity() {
                     bottom = 48.dp
                 )
         ) {
-            Text("Connected to $deviceName", fontSize = 28.sp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onBack) {
+                    Text("Back to Menu")
+                }
+                Text(
+                    "Connected to $deviceName",
+                    fontSize = 24.sp,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .weight(1f)
+                        .wrapContentWidth(Alignment.End)
+                )
+            }
             Spacer(modifier = Modifier.height(16.dp))
 
             // Single LazyColumn for all characteristics
@@ -969,13 +1360,22 @@ class MainActivity : ComponentActivity() {
 
 
     @Composable
-    fun GraphScreen() {
+    fun GraphScreen(onBack: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(24.dp)
         ) {
-            Text("📈 Graphing characteristic data...", fontSize = 24.sp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onBack) {
+                    Text("Back")
+                }
+                Text("📈 Graphing characteristic data...", fontSize = 24.sp)
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
