@@ -1,69 +1,90 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | -------- | -------- | -------- |
+## INMP441 Mic + WS2812 Sound Indicator (ESP32)
 
-# Blink Example
+This setup uses **one INMP441 I2S microphone** to detect sound and turns a **WS2812 LED green** when sound exceeds a threshold.
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+---
 
-This example demonstrates how to blink a LED by using the GPIO driver or using the [led_strip](https://components.espressif.com/component/espressif/led_strip) library if the LED is addressable e.g. [WS2812](https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf). The `led_strip` library is installed via [component manager](main/idf_component.yml).
+### Hardware
+- ESP32 (standard DevKit / Gold Edition)
+- INMP441 I2S MEMS microphone
+- WS2812 RGB LED
+- 3.3 V power from ESP32
 
-## How to Use Example
+---
 
-Before project configuration and build, be sure to set the correct chip target using `idf.py set-target <chip_name>`.
+### INMP441 Wiring (I2S)
 
-### Hardware Required
+| INMP441 | ESP32 | Description |
+|--------|-------|-------------|
+| VDD | 3.3V | Power (**not 5V**) |
+| GND | GND | Ground |
+| SCK | GPIO26 | I2S Bit Clock (BCLK) |
+| WS | GPIO25 | I2S Word Select (LRCLK) |
+| SD | GPIO33 | I2S Data → ESP32 |
+| L/R | GND | Channel select (must be tied) |
 
-* A development board with normal LED or addressable LED on-board (e.g., ESP32-S3-DevKitC, ESP32-C6-DevKitC etc.)
-* A USB cable for Power supply and programming
+---
 
-See [Development Boards](https://www.espressif.com/en/products/devkits) for more information about it.
+### WS2812 Wiring
 
-### Configure the Project
+| WS2812 | ESP32 |
+|-------|-------|
+| DIN | GPIO2 |
+| VCC | 3.3V or 5V |
+| GND | GND |
 
-Open the project configuration menu (`idf.py menuconfig`).
+---
 
-In the `Example Configuration` menu:
+### Firmware Behavior
+- ESP32 runs as **I2S master (RX)**
+- Audio sampled at **16 kHz**
+- Peak audio level is measured
+- **LED turns green when sound > threshold**, otherwise off
 
-* Select the LED type in the `Blink LED type` option.
-  * Use `GPIO` for regular LED
-  * Use `LED strip` for addressable LED
-* If the LED type is `LED strip`, select the backend peripheral
-  * `RMT` is only available for ESP targets with RMT peripheral supported
-  * `SPI` is available for all ESP targets
-* Set the GPIO number used for the signal in the `Blink GPIO number` option.
-* Set the blinking period in the `Blink period in ms` option.
+---
 
-### Build and Flash
+### Notes
+- INMP441 outputs **24-bit audio in 32-bit I2S slots**
+- Adjust the sound threshold in code for sensitivity
+- Designed for **single-microphone** use
 
-Run `idf.py -p PORT flash monitor` to build, flash and monitor the project.
 
-(To exit the serial monitor, type ``Ctrl-]``.)
 
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
 
-## Example Output
+## TODO — BLE-Sync Evaluation Checklist
 
-As you run the example, you will see the LED blinking, according to the previously defined period. For the addressable LED, you can also change the LED color by setting the `led_strip_set_pixel(led_strip, 0, 16, 16, 16);` (LED Strip, Pixel Number, Red, Green, Blue) with values from 0 to 255 in the [source file](main/blink_example_main.c).
+### Firmware (ESP32 / White-box)
+- [ ] Implement event detection (clap / impulse)
+- [ ] Timestamp event using `esp_timer_get_time()`
+- [ ] Gate detection to emit **one timestamp per event**
+- [ ] (Lab) Toggle a GPIO at the same code location as timestamp
+- [ ] Log timestamp + event ID over UART/BLE
+- [ ] Measure detection latency + jitter with logic analyzer
+- [ ] Record bounds on sensor-side timestamp error
 
-```text
-I (315) example: Example configured to blink addressable LED!
-I (325) example: Turning the LED OFF!
-I (1325) example: Turning the LED ON!
-I (2325) example: Turning the LED OFF!
-I (3325) example: Turning the LED ON!
-I (4325) example: Turning the LED OFF!
-I (5325) example: Turning the LED ON!
-I (6325) example: Turning the LED OFF!
-I (7325) example: Turning the LED ON!
-I (8325) example: Turning the LED OFF!
-```
+### Android (Central Timebase)
+- [ ] Use Android system clock as global reference
+- [ ] Receive BLE packets with embedded sensor timestamps
+- [ ] Store `(t_sensor, t_android_arrival)` pairs
+- [ ] Fit affine clock model (`t_android = a * t_sensor + b`)
+- [ ] Update offset/drift periodically (filter / regression)
+- [ ] Convert all sensor events into Android time
 
-Note: The color order could be different according to the LED model.
+### Black-box Device Handling
+- [ ] Identify available timing info (arrival time, sequence number, sample index)
+- [ ] Reconstruct timeline assuming fixed sample rate
+- [ ] Apply same affine fitting pipeline (index → Android time)
+- [ ] Quantify reconstruction error and jitter
+- [ ] Explicitly label results as **timeline alignment**, not true clock sync
 
-The pixel number indicates the pixel position in the LED strip. For a single LED, use 0.
+### Ground Truth & Validation
+- [ ] Use GPIO + logic analyzer to validate white-box timestamps
+- [ ] Use audio / cross-modal events for black-box consistency checks
+- [ ] Use NTP only as coarse absolute reference (not sub-ms truth)
+- [ ] Report median, 95th percentile, and long-term drift
 
-## Troubleshooting
-
-* If the LED isn't blinking, check the GPIO or the LED type selection in the `Example Configuration` menu.
-
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+### Evaluation & Reporting
+- [ ] Compare white-box vs black-box accuracy
+- [ ] Measure stability over time (minutes → hours)
+- [ ] Quantify how sync error affects downstream tasks
+- [ ] Clearly state assumptions and limits per device class

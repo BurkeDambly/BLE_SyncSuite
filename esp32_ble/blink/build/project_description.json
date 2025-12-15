@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "blink",
-    "project_version":    "1c9440a-dirty",
+    "project_version":    "90c67be-dirty",
     "project_path":       "C:/Users/burke/Documents/BLE_SyncSuite/esp32_ble/blink",
     "idf_path":           "C:/Users/burke/esp/v5.4.1/esp-idf",
     "build_dir":          "C:/Users/burke/Documents/BLE_SyncSuite/esp32_ble/blink/build",
