@@ -39,15 +39,13 @@ import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.os.Build
 import android.util.Log
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
-import android.os.SystemClock
 import androidx.annotation.RequiresPermission
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 
 // --- Jetpack Compose: State-Driven Lists ---
 import androidx.compose.runtime.mutableStateListOf
@@ -66,6 +64,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.TextButton
 
@@ -88,6 +87,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -101,6 +102,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.font.FontWeight
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -112,9 +114,21 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import java.util.Locale
 import android.os.Handler
+import android.os.SystemClock
 import android.annotation.SuppressLint
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import androidx.compose.runtime.collectAsState
 
 // --- Main App Logic Starts Here ---
+
+// ESP32 notification packet data class
+data class EspPacket(
+    val seq: Long,           // uint32 sequence number
+    val tUs: Long,           // uint64 timestamp in microseconds since boot
+    val receivedAtNs: Long   // SystemClock.elapsedRealtimeNanos() when received
+)
 
 // Simple data class to represent each characteristic and its service
 data class CharacteristicInfo(
@@ -148,9 +162,30 @@ private const val PERMISSION_BLUETOOTH_SCAN = "android.permission.BLUETOOTH_SCAN
 private const val PERMISSION_BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
 private val CLIENT_CONFIG_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
-// ▶︎ ADD — Nordic UART service/characteristics
-private val NUS_SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-private val NUS_TX_UUID      = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")  // notify
+// ESP32 service and characteristic UUIDs
+// Service: Environmental Sensing (0x181A) - 16-bit UUID
+private val ESP32_SERVICE_UUID = UUID.fromString("0000181a-0000-1000-8000-00805f9b34fb")  // 0x181A
+// Characteristic: Custom 128-bit UUID (0015a1a1-1212-efde-1523-785feabcd123)
+private val ESP32_CHAR_UUID = UUID.fromString("0015a1a1-1212-efde-1523-785feabcd123")  // notify characteristic
+
+// Helper functions to parse little-endian unsigned integers from ByteArray
+private fun u32LE(bytes: ByteArray, offset: Int): Long {
+    return ((bytes[offset + 0].toUByte().toLong() and 0xFF) shl 0) or
+           ((bytes[offset + 1].toUByte().toLong() and 0xFF) shl 8) or
+           ((bytes[offset + 2].toUByte().toLong() and 0xFF) shl 16) or
+           ((bytes[offset + 3].toUByte().toLong() and 0xFF) shl 24)
+}
+
+private fun u64LE(bytes: ByteArray, offset: Int): Long {
+    return ((bytes[offset + 0].toUByte().toLong() and 0xFF) shl 0) or
+           ((bytes[offset + 1].toUByte().toLong() and 0xFF) shl 8) or
+           ((bytes[offset + 2].toUByte().toLong() and 0xFF) shl 16) or
+           ((bytes[offset + 3].toUByte().toLong() and 0xFF) shl 24) or
+           ((bytes[offset + 4].toUByte().toLong() and 0xFF) shl 32) or
+           ((bytes[offset + 5].toUByte().toLong() and 0xFF) shl 40) or
+           ((bytes[offset + 6].toUByte().toLong() and 0xFF) shl 48) or
+           ((bytes[offset + 7].toUByte().toLong() and 0xFF) shl 56)
+}
 
 
 // Main logic
@@ -165,8 +200,6 @@ class MainActivity : ComponentActivity() {
     private var showWelcomeScreen by mutableStateOf(true)
     private var showMainMenu by mutableStateOf(false)
     private var showScannerScreen by mutableStateOf(false)
-    private var showAudioVisualizerScreen by mutableStateOf(false)
-    private var navigateToAudioWhenPermissionGranted = false
     private var startScanWhenPermissionGranted = false
 
     // Keeps track of the switch state for BLE scanning
@@ -196,6 +229,13 @@ class MainActivity : ComponentActivity() {
     private var graphCharUuid: UUID? = null
     private var graphServiceUuid: UUID? = null
 
+    // ESP32 packet state - latest received packet
+    private val _latestEspPacket = MutableStateFlow<EspPacket?>(null)
+    val latestEspPacket: StateFlow<EspPacket?> = _latestEspPacket.asStateFlow()
+    
+    // Store all ESP32 packets for graphing
+    private val esp32PacketHistory = mutableStateListOf<EspPacket>()
+
     // This is a list of all the permissions we want to request from the user at runtime.
     // Android doesn't grant these automatically; the user must approve them.
     private val isAtLeastS: Boolean
@@ -204,8 +244,7 @@ class MainActivity : ComponentActivity() {
     private fun permissionsToRequest(): Array<String> {
         val required = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION,
-            Manifest.permission.RECORD_AUDIO
+            Manifest.permission.ACCESS_COARSE_LOCATION
         )
 
         if (isAtLeastS) {
@@ -291,16 +330,10 @@ class MainActivity : ComponentActivity() {
             if (denied) {
                 // Show a message if one or more permissions were not granted
                 Toast.makeText(this, "Some permissions were denied.", Toast.LENGTH_LONG).show()
-                navigateToAudioWhenPermissionGranted = false
                 startScanWhenPermissionGranted = false
             } else {
                 // All permissions granted — app is ready to scan/connect
                 Toast.makeText(this, "All permissions granted!", Toast.LENGTH_SHORT).show()
-                if (navigateToAudioWhenPermissionGranted) {
-                    showMainMenu = false
-                    showAudioVisualizerScreen = true
-                }
-                navigateToAudioWhenPermissionGranted = false
 
                 if (startScanWhenPermissionGranted && hasScanPermission()) {
                     startScanWhenPermissionGranted = false
@@ -325,12 +358,6 @@ class MainActivity : ComponentActivity() {
                             showWelcomeScreen = false
                             showMainMenu = true
                         }
-                        showAudioVisualizerScreen -> AudioVisualizerScreen(
-                            onBack = {
-                                showAudioVisualizerScreen = false
-                                showMainMenu = true
-                            }
-                        )
                         showGraphScreen -> GraphScreen(
                             onBack = { showGraphScreen = false }
                         )
@@ -377,18 +404,12 @@ class MainActivity : ComponentActivity() {
                             onConnectToDevice = {
                                 showMainMenu = false
                                 showScannerScreen = true
-                            },
-                            onOpenAudioVisualizer = {
-                                openAudioVisualizerWithPermissionCheck()
                             }
                         )
                         else -> MainMenuScreen(
                             onConnectToDevice = {
                                 showMainMenu = false
                                 showScannerScreen = true
-                            },
-                            onOpenAudioVisualizer = {
-                                openAudioVisualizerWithPermissionCheck()
                             }
                         )
                     }
@@ -431,26 +452,6 @@ class MainActivity : ComponentActivity() {
         } else {
             // Nothing to request — let the user know
             Toast.makeText(this, "All permissions already granted!", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun openAudioVisualizerWithPermissionCheck() {
-        val hasAudioPermission = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (hasAudioPermission) {
-            showMainMenu = false
-            showAudioVisualizerScreen = true
-        } else {
-            navigateToAudioWhenPermissionGranted = true
-            permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
-            Toast.makeText(
-                this,
-                "Microphone permission is required to open the audio visualizer.",
-                Toast.LENGTH_SHORT
-            ).show()
         }
     }
 
@@ -653,24 +654,42 @@ class MainActivity : ComponentActivity() {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            // ▶︎ append this BLE fragment to the rolling buffer
+            // Only handle ESP32 notifications on ESP32_CHAR_UUID - ignore all other characteristics
+            if (characteristic.uuid != ESP32_CHAR_UUID) {
+                return
+            }
+
             @Suppress("DEPRECATION")
-            val rawBytes = characteristic.value ?: return
-            val chunk = rawBytes.toString(Charsets.UTF_8)
-            bleBuffer.append(chunk)
+            val value = characteristic.value
+            
+            // Decode ESP32 12-byte payload
+            if (value == null || value.size < 12) {
+                Log.w("ESP32", "Invalid packet size: ${value?.size ?: 0}, expected 12 bytes")
+                return
+            }
 
-            // ▶︎ process every complete line we now have
-            while (true) {
-                val nl = bleBuffer.indexOf("\n")
-                if (nl == -1) break                        // still waiting for a newline
+            try {
+                val seq = u32LE(value, 0)        // bytes[0..3] = uint32 seq
+                val tUs = u64LE(value, 4)        // bytes[4..11] = uint64 timestamp
+                val receivedAtNs = SystemClock.elapsedRealtimeNanos()
 
-                val fullLine = bleBuffer.substring(0, nl).trim()
-                bleBuffer.delete(0, nl + 1)               // drop processed part
+                val packet = EspPacket(seq = seq, tUs = tUs, receivedAtNs = receivedAtNs)
 
-                if (fullLine.isNotEmpty()) {
-                    Log.d("BLE_PACKET_FULL", fullLine)    // e.g. @A,EDA,123…,0.6789
-                    receivedDataList.add(fullLine)        // drives your graph/UI
+                // Log the packet
+                Log.d("ESP32", "ESP pkt seq=$seq, tUs=$tUs, receivedAtNs=$receivedAtNs, len=${value.size}")
+
+                // Update StateFlow for UI
+                _latestEspPacket.value = packet
+                
+                // Add to history for graphing (keep last 1000 packets)
+                this@MainActivity.runOnUiThread {
+                    esp32PacketHistory.add(packet)
+                    if (esp32PacketHistory.size > 1000) {
+                        esp32PacketHistory.removeAt(0)
+                    }
                 }
+            } catch (e: Exception) {
+                Log.e("ESP32", "Error decoding packet", e)
             }
         }
 
@@ -703,46 +722,37 @@ class MainActivity : ComponentActivity() {
                 return
             }
 
-            // Clear previous entries before adding new ones
-            gatt.getService(NUS_SERVICE_UUID)
-                ?.getCharacteristic(NUS_TX_UUID)
+            // Enable notifications for ESP32 characteristic (ESP32_CHAR_UUID) if found
+            gatt.getService(ESP32_SERVICE_UUID)
+                ?.getCharacteristic(ESP32_CHAR_UUID)
                 ?.let { tx ->
                     gatt.setCharacteristicNotification(tx, true)
                     tx.getDescriptor(CLIENT_CONFIG_DESCRIPTOR_UUID)?.let { cccd ->
                         writeClientConfigValue(gatt, cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                     }
-                    graphCharUuid  = tx.uuid       // keeps your old logic happy
-                    graphServiceUuid = NUS_SERVICE_UUID
-                    Log.i("BLE", "✅ Subscribed to Nordic‑UART TX")
-                } ?: Log.e("BLE", "❌ Nordic‑UART TX characteristic not found")
+                    graphCharUuid = tx.uuid
+                    graphServiceUuid = ESP32_SERVICE_UUID
+                    Log.i("BLE", "✅ Subscribed to ESP32 sensor characteristic")
+                    
+                    // Only add the ESP32 characteristic to the UI list (must run on UI thread)
+                    runOnUiThread {
+                        val props = tx.properties
+                        val propsList = mutableListOf<String>().apply {
+                            if (props and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("READ")
+                            if (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("WRITE")
+                            if (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("NOTIFY")
+                            if (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("INDICATE")
+                        }.joinToString()
 
-            // Loop through all discovered services
-            for (service in gatt.services) {
-                Log.i("BLE", "🧩 Service UUID: ${service.uuid}")
-
-                // For each service, loop through its characteristics
-                for (characteristic in service.characteristics) {
-                    val props = characteristic.properties
-                    val propsList = mutableListOf<String>().apply {
-                        if (props and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("READ")
-                        if (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("WRITE")
-                        if (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("NOTIFY")
-                        if (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("INDICATE")
-                    }.joinToString()
-
-                    val serviceName = standardServiceNames[service.uuid] ?: "Unknown Service"
-                    val charName = standardCharacteristicNames[characteristic.uuid] ?: "Unknown Characteristic"
-
-                    val info = CharacteristicInfo(service.uuid, serviceName, characteristic.uuid, charName, propsList)
-
-                    // ✅ Only add if it's not already in the list
-                    if (!characteristicInfoList.any {
-                            it.charUuid == info.charUuid && it.serviceUuid == info.serviceUuid
-                        }) {
+                        val serviceName = standardServiceNames[ESP32_SERVICE_UUID] ?: "Environmental Sensing"
+                        val charName = "ESP32 Sensor Data"
+                        val info = CharacteristicInfo(ESP32_SERVICE_UUID, serviceName, tx.uuid, charName, propsList)
+                        
+                        characteristicInfoList.clear()
                         characteristicInfoList.add(info)
+                        Log.i("BLE", "✅ Added ESP32 characteristic to UI list")
                     }
-                }
-            }
+                } ?: Log.e("BLE", "❌ ESP32 sensor characteristic not found")
 
         }
 
@@ -1012,8 +1022,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun MainMenuScreen(
-        onConnectToDevice: () -> Unit,
-        onOpenAudioVisualizer: () -> Unit
+        onConnectToDevice: () -> Unit
     ) {
         Column(
             modifier = Modifier
@@ -1034,238 +1043,6 @@ class MainActivity : ComponentActivity() {
             Button(onClick = onConnectToDevice, modifier = Modifier.fillMaxWidth()) {
                 Text("Connect to Device")
             }
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(onClick = onOpenAudioVisualizer, modifier = Modifier.fillMaxWidth()) {
-                Text("Audio Visualizer")
-            }
-        }
-    }
-
-
-    @Composable
-    fun AudioVisualizerScreen(onBack: () -> Unit) {
-        val context = LocalContext.current
-        val scope = rememberCoroutineScope()
-        val hasAudioPermission = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-
-        var isRecording by remember { mutableStateOf(false) }
-        var elapsedMicros by remember { mutableLongStateOf(0L) }
-        var audioRecord by remember { mutableStateOf<AudioRecord?>(null) }
-        val waveformSamples = remember { mutableStateListOf<Float>() }
-        var recordingJob by remember { mutableStateOf<Job?>(null) }
-        var startTimeNanos by remember { mutableLongStateOf(0L) }
-
-        fun stopRecording() {
-            isRecording = false
-            recordingJob?.cancel()
-            recordingJob = null
-            audioRecord?.run {
-                try {
-                    stop()
-                } catch (_: IllegalStateException) {
-                    // already stopped
-                }
-                release()
-            }
-            audioRecord = null
-        }
-
-        DisposableEffect(Unit) {
-            onDispose {
-                stopRecording()
-            }
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 32.dp),
-            verticalArrangement = Arrangement.Top,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = {
-                    stopRecording()
-                    onBack()
-                }) {
-                    Text("Back")
-                }
-                Text("Audio Visualizer", fontSize = 28.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = if (hasAudioPermission) "Tap start to capture microphone audio." else "Microphone permission is required.",
-                fontSize = 16.sp,
-                color = if (hasAudioPermission) Color.Gray else Color(0xFFD32F2F),
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(220.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF101820))
-                    .padding(12.dp)
-            ) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    drawRect(Color(0xFF101820))
-
-                    if (waveformSamples.isNotEmpty()) {
-                        val path = Path()
-                        val mirrorPath = Path()
-                        val widthStep = size.width / (waveformSamples.size - 1).coerceAtLeast(1)
-                        waveformSamples.forEachIndexed { index, amplitude ->
-                            val x = index * widthStep
-                            val y = size.height / 2f - (amplitude * size.height / 2f)
-                            val mirroredY = size.height / 2f + (amplitude * size.height / 2f)
-                            if (index == 0) {
-                                path.moveTo(x, y)
-                                mirrorPath.moveTo(x, mirroredY)
-                            } else {
-                                path.lineTo(x, y)
-                                mirrorPath.lineTo(x, mirroredY)
-                            }
-                        }
-                        drawPath(path = path, color = Color(0xFF64FFDA), style = Stroke(width = 3f))
-                        drawPath(path = mirrorPath, color = Color(0xFF64FFDA), style = Stroke(width = 3f))
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            val elapsedText = if (isRecording) {
-                String.format(Locale.US, "Elapsed: %,d us", elapsedMicros)
-            } else {
-                "Elapsed: 0 us"
-            }
-
-            Text(text = elapsedText, fontSize = 20.sp)
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Button(
-                    enabled = hasAudioPermission && !isRecording,
-                    onClick = {
-                        if (!hasAudioPermission) {
-                            Toast.makeText(context, "Microphone permission denied", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-
-                        val sampleRate = 44100
-                        val minBuffer = AudioRecord.getMinBufferSize(
-                            sampleRate,
-                            AudioFormat.CHANNEL_IN_MONO,
-                            AudioFormat.ENCODING_PCM_16BIT
-                        )
-
-                        if (minBuffer <= 0) {
-                            Toast.makeText(context, "Unsupported audio configuration", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-
-                        val bufferSize = minBuffer.coerceAtLeast(sampleRate / 10)
-
-                        val record = AudioRecord.Builder()
-                            .setAudioSource(MediaRecorder.AudioSource.MIC)
-                            .setAudioFormat(
-                                AudioFormat.Builder()
-                                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                                    .setSampleRate(sampleRate)
-                                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                                    .build()
-                            )
-                            .setBufferSizeInBytes(bufferSize * 2)
-                            .build()
-
-                        audioRecord = record
-
-                        try {
-                            record.startRecording()
-                        } catch (_: IllegalStateException) {
-                            record.release()
-                            audioRecord = null
-                            Toast.makeText(context, "Unable to start recording", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-
-                        waveformSamples.clear()
-                        startTimeNanos = SystemClock.elapsedRealtimeNanos()
-                        elapsedMicros = 0L
-                        isRecording = true
-
-                        recordingJob = scope.launch(Dispatchers.Default) {
-                            val buffer = ShortArray(bufferSize)
-                            while (isActive && isRecording) {
-                                val read = try {
-                                    record.read(buffer, 0, buffer.size)
-                                } catch (_: IllegalStateException) {
-                                    break
-                                }
-
-                                if (read > 0) {
-                                    val peak = (0 until read).maxOf { index ->
-                                        abs(buffer[index].toInt())
-                                    }.toFloat()
-
-                                    val normalized = (peak / Short.MAX_VALUE.toFloat()).coerceIn(0f, 1f)
-                                    val micros = (SystemClock.elapsedRealtimeNanos() - startTimeNanos) / 1000L
-
-                                    withContext(Dispatchers.Main) {
-                                        elapsedMicros = micros
-                                        waveformSamples.add(normalized)
-                                        val maxSamples = 240
-                                        if (waveformSamples.size > maxSamples) {
-                                            repeat(waveformSamples.size - maxSamples) {
-                                                if (waveformSamples.isNotEmpty()) {
-                                                    waveformSamples.removeAt(0)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            withContext(Dispatchers.Main) {
-                                stopRecording()
-                            }
-                        }
-                    }
-                ) {
-                    Text("Start")
-                }
-
-                Button(
-                    enabled = isRecording,
-                    onClick = {
-                        stopRecording()
-                        elapsedMicros = 0L
-                    }
-                ) {
-                    Text("Stop")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(
-                text = if (isRecording) "Recording at 44.1 kHz (mono)" else "Recorder idle",
-                fontSize = 14.sp,
-                color = Color.Gray
-            )
         }
     }
 
@@ -1329,6 +1106,25 @@ class MainActivity : ComponentActivity() {
             }
             Spacer(modifier = Modifier.height(16.dp))
 
+            // ESP32 packet display section
+            val latestPacket by latestEspPacket.collectAsState()
+            if (latestPacket != null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .background(Color(0xFFE3F2FD), RoundedCornerShape(8.dp))
+                        .padding(16.dp)
+                ) {
+                    Text("ESP32 Latest Packet", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("seq: ${latestPacket!!.seq}", fontSize = 14.sp, color = Color.Black)
+                    Text("tUs: ${latestPacket!!.tUs}", fontSize = 14.sp, color = Color.Black)
+                    Text("receivedAtNs: ${latestPacket!!.receivedAtNs}", fontSize = 14.sp, color = Color.Black)
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             // Single LazyColumn for all characteristics
             LazyColumn(state = listState) {
                 items(characteristicInfoList) { info ->
@@ -1341,41 +1137,15 @@ class MainActivity : ComponentActivity() {
                             .fillMaxWidth()
                             .bringIntoViewRequester(bringIntoViewRequester)
                             .clickable {
-                                expandedCharUuid = if (expandedCharUuid == info.charUuid) null else info.charUuid
+                                // Clicking on ESP32 characteristic opens graph
+                                if (info.charUuid == ESP32_CHAR_UUID) {
+                                    showGraphScreen = true
+                                } else {
+                                    expandedCharUuid = if (expandedCharUuid == info.charUuid) null else info.charUuid
 
-                                coroutineScope.launch {
-                                    bringIntoViewRequester.bringIntoView()
-                                }
-
-                                if (!hasConnectPermission(context)) {
-                                    Toast.makeText(
-                                        context,
-                                        "Bluetooth permission not granted",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                    return@clickable
-                                }
-
-                                try {
-                                    if (setNotificationsForCharacteristic(info, true)) {
-                                        notificationStates[info.charUuid] = true
-                                        graphCharUuid = info.charUuid
-                                        graphServiceUuid = info.serviceUuid
-                                        showGraphScreen = true
-                                    } else {
-                                        Toast.makeText(
-                                            context,
-                                            "Unable to update notifications for this characteristic",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
+                                    coroutineScope.launch {
+                                        bringIntoViewRequester.bringIntoView()
                                     }
-                                } catch (securityException: SecurityException) {
-                                    Log.e("BLE", "Notification subscription rejected", securityException)
-                                    Toast.makeText(
-                                        context,
-                                        "OS rejected notification request",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
                                 }
                             }
                             .padding(16.dp)
@@ -1492,6 +1262,8 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun GraphScreen(onBack: () -> Unit) {
+        val packets: List<EspPacket> = esp32PacketHistory.toList()
+        
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1505,14 +1277,284 @@ class MainActivity : ComponentActivity() {
                 TextButton(onClick = onBack) {
                     Text("Back")
                 }
-                Text("📈 Graphing characteristic data...", fontSize = 24.sp)
+                Text("📈 Seq vs Timestamps", fontSize = 24.sp)
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            LazyColumn {
-                items(receivedDataList) { entry ->
-                    Text("Data: $entry")
+            if (packets.isEmpty()) {
+                Text("No data yet. Waiting for ESP32 packets...", color = Color.Gray)
+            } else {
+                // Graph: seq (x-axis) vs normalized timestamps (y-axis)
+                // Plot both ESP32 tUs and Android receivedAtNs on same graph
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(400.dp)
+                        .background(Color.White, RoundedCornerShape(8.dp))
+                        .padding(16.dp)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        if (packets.size < 2) {
+                            // Need at least 2 points to draw a line
+                            return@Canvas
+                        }
+
+                        val minSeq = packets.minOf { it.seq }.toFloat()
+                        val maxSeq = packets.maxOf { it.seq }.toFloat()
+                        
+                        // Normalize ESP32 timestamps (microseconds) to start from 0
+                        val firstTUs = packets.first().tUs.toFloat()
+                        val tUsValues = packets.map { (it.tUs - firstTUs).toFloat() }
+                        val maxTUsNormalized = tUsValues.maxOrNull() ?: 1f
+                        val tUsRange = maxTUsNormalized.coerceAtLeast(1f)
+                        
+                        // Normalize Android reception timestamps (nanoseconds) to start from 0
+                        val firstReceivedAtNs = packets.first().receivedAtNs.toFloat()
+                        val receivedAtNsValues = packets.map { (it.receivedAtNs - firstReceivedAtNs) / 1000f } // Convert ns to μs
+                        val maxReceivedAtNsNormalized = receivedAtNsValues.maxOrNull() ?: 1f
+                        val receivedAtNsRange = maxReceivedAtNsNormalized.coerceAtLeast(1f)
+
+                        // Use the larger range for y-axis scaling
+                        val maxYRange = maxOf(tUsRange, receivedAtNsRange)
+
+                        val padding = 50f
+                        val graphWidth = size.width - padding * 2
+                        val graphHeight = size.height - padding * 2
+                        val seqRange = (maxSeq - minSeq).coerceAtLeast(1f)
+
+                        // Draw axes
+                        drawLine(
+                            start = Offset(padding, size.height - padding),
+                            end = Offset(size.width - padding, size.height - padding),
+                            color = Color.Gray,
+                            strokeWidth = 2f
+                        )
+                        drawLine(
+                            start = Offset(padding, padding),
+                            end = Offset(padding, size.height - padding),
+                            color = Color.Gray,
+                            strokeWidth = 2f
+                        )
+
+                        // Draw ESP32 timestamp line (blue)
+                        val esp32Path = Path()
+                        packets.forEachIndexed { index, packet ->
+                            val x = padding + ((packet.seq - minSeq) / seqRange) * graphWidth
+                            val normalizedTUs = ((packet.tUs - firstTUs).toFloat() / maxYRange)
+                            val y = size.height - padding - (normalizedTUs * graphHeight)
+
+                            if (index == 0) {
+                                esp32Path.moveTo(x, y)
+                            } else {
+                                esp32Path.lineTo(x, y)
+                            }
+                        }
+
+                        drawPath(
+                            path = esp32Path,
+                            color = Color(0xFF3F51B5), // Blue for ESP32
+                            style = Stroke(width = 3f)
+                        )
+
+                        // Draw Android reception timestamp line (green)
+                        val androidPath = Path()
+                        packets.forEachIndexed { index, packet ->
+                            val x = padding + ((packet.seq - minSeq) / seqRange) * graphWidth
+                            val normalizedReceivedAt = (((packet.receivedAtNs - firstReceivedAtNs) / 1000f) / maxYRange)
+                            val y = size.height - padding - (normalizedReceivedAt * graphHeight)
+
+                            if (index == 0) {
+                                androidPath.moveTo(x, y)
+                            } else {
+                                androidPath.lineTo(x, y)
+                            }
+                        }
+
+                        drawPath(
+                            path = androidPath,
+                            color = Color(0xFF4CAF50), // Green for Android
+                            style = Stroke(width = 3f)
+                        )
+                    }
+                    
+                    // Legend
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(4.dp))
+                            .padding(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .background(Color(0xFF3F51B5))
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ESP32 tUs", fontSize = 10.sp, color = Color.Black)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .background(Color(0xFF4CAF50))
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Android Rx", fontSize = 10.sp, color = Color.Black)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Calculate drift and jitter metrics
+                if (packets.size >= 2) {
+                    val first = packets.first()
+                    
+                    // Filter out packets with sequence number gaps (packet loss)
+                    // Only include consecutive packets for baseline calculation
+                    val validPackets = mutableListOf<EspPacket>()
+                    validPackets.add(packets.first()) // Always include first packet
+                    
+                    for (i in 1 until packets.size) {
+                        val prevSeq = packets[i - 1].seq
+                        val currSeq = packets[i].seq
+                        // Check if sequence is consecutive (allowing for uint32 wraparound at 0xFFFF_FFFFL)
+                        if (currSeq == prevSeq + 1L || (prevSeq == 0xFFFF_FFFFL && currSeq == 0L)) {
+                            validPackets.add(packets[i])
+                        }
+                    }
+                    
+                    // Calculate offset-based jitter strictly from valid (consecutive) packets only
+                    // For each valid packet, compute offsetMs = ((receivedAtNs - first.receivedAtNs) - ((tUs - first.tUs) * 1000L)) / 1_000_000.0
+                    val validOffsetValues = validPackets.map { packet ->
+                        val androidRxElapsed = packet.receivedAtNs - first.receivedAtNs // ns
+                        val esp32SendElapsed = (packet.tUs - first.tUs) * 1000L // Convert μs to ns
+                        (androidRxElapsed - esp32SendElapsed) / 1_000_000.0 // Convert to ms
+                    }
+                    
+                    // Estimate baseline offset as median of valid offsets (data-derived, not fixed)
+                    val baselineOffsetMs = if (validOffsetValues.isNotEmpty()) {
+                        val sorted = validOffsetValues.sorted()
+                        val mid = sorted.size / 2
+                        if (sorted.size % 2 == 0) {
+                            (sorted[mid - 1] + sorted[mid]) / 2.0
+                        } else {
+                            sorted[mid]
+                        }
+                    } else {
+                        0.0
+                    }
+                    
+                    // Calculate jitterMs = abs(offsetMs - baselineOffsetMs) only for valid packets
+                    val jitterValues = validOffsetValues.map { offsetMs ->
+                        kotlin.math.abs(offsetMs - baselineOffsetMs)
+                    }
+                    
+                    // Running average jitter (calculated only from valid jitter values)
+                    val runningJitterAvg = if (jitterValues.isNotEmpty()) {
+                        jitterValues.average()
+                    } else {
+                        0.0
+                    }
+                    
+                    // Calculate delay metrics (offset)
+                    // Running average offset (from valid packets only)
+                    val runningOffsetAvg = if (validOffsetValues.isNotEmpty()) {
+                        validOffsetValues.average()
+                    } else {
+                        0.0
+                    }
+                    
+                    // Latest offset: use the last valid consecutive packet (validPackets.last)
+                    val latestOffset = if (validOffsetValues.isNotEmpty() && validPackets.isNotEmpty()) {
+                        validOffsetValues.last()
+                    } else {
+                        0.0
+                    }
+                    
+                    // Latest jitter: compute from latest valid packet using abs(latestOffset - baselineOffsetMs)
+                    val latestJitter = if (validOffsetValues.isNotEmpty() && validPackets.isNotEmpty()) {
+                        kotlin.math.abs(latestOffset - baselineOffsetMs)
+                    } else {
+                        0.0
+                    }
+                    
+                    // Calculate dropped packet count
+                    val droppedPacketCount = packets.size - validPackets.size
+                    
+                    // Calculate transmission rate from ESP32 intervals
+                    val transmissionRate = if (validPackets.size >= 2) {
+                        val intervals = mutableListOf<Long>()
+                        for (i in 1 until validPackets.size) {
+                            val intervalUs = validPackets[i].tUs - validPackets[i - 1].tUs
+                            intervals.add(intervalUs)
+                        }
+                        if (intervals.isNotEmpty()) {
+                            val avgIntervalUs = intervals.average()
+                            avgIntervalUs / 1000.0 // Convert to ms
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
+                    
+                    // Make metrics section scrollable
+                    val scrollState = rememberScrollState()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(scrollState)
+                    ) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Transmission rate
+                        Text("Transmission Rate:", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("  Average Interval: ${String.format("%.2f", transmissionRate)} ms", fontSize = 12.sp, color = Color.White)
+                        if (transmissionRate > 0) {
+                            val packetsPerSecond = 1000.0 / transmissionRate
+                            Text("  Rate: ${String.format("%.2f", packetsPerSecond)} packets/sec", fontSize = 12.sp, color = Color.White)
+                        }
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Delay metrics (offset)
+                        Text("Delay Metrics:", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("  Running Average: ${String.format("%.3f", runningOffsetAvg)} ms", fontSize = 12.sp, color = Color.White)
+                        Text("  Latest: ${String.format("%.3f", latestOffset)} ms", fontSize = 12.sp, color = Color.White)
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Jitter metrics
+                        Text("Jitter Metrics:", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("  Running Average: ${String.format("%.3f", runningJitterAvg)} ms", fontSize = 12.sp, color = Color.White)
+                        Text("  Latest: ${String.format("%.3f", latestJitter)} ms", fontSize = 12.sp, color = Color.White)
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Packet statistics
+                        Text("Packet Statistics:", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("  Total packets: ${packets.size}", fontSize = 12.sp, color = Color.White)
+                        Text("  Valid packets: ${validPackets.size}", fontSize = 12.sp, color = Color.White)
+                        Text("  Dropped packets: $droppedPacketCount", fontSize = 12.sp, color = Color.White)
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Time spans
+                        val latest = packets.last()
+                        val tUsDelta = (latest.tUs - first.tUs) / 1000.0
+                        val rxDelta = (latest.receivedAtNs - first.receivedAtNs) / 1_000_000.0
+                        
+                        Text("Time Spans:", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("  ESP32 span: ${String.format("%.1f", tUsDelta)} ms", fontSize = 12.sp, color = Color(0xFF3F51B5))
+                        Text("  Android Rx span: ${String.format("%.1f", rxDelta)} ms", fontSize = 12.sp, color = Color(0xFF4CAF50))
+                    }
+                } else if (packets.size == 1) {
+                    Text("Waiting for more packets to calculate drift and jitter...", fontSize = 12.sp, color = Color.Gray)
                 }
             }
         }
