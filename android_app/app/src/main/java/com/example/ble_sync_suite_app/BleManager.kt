@@ -1,5 +1,7 @@
 package com.example.ble_sync_suite_app
 
+// BLE Manager: BLE scan, connect, GATT, and CheepSync. Sync math is in sync/CheepSync.kt.
+
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -21,10 +23,10 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.annotation.RequiresPermission
+import com.example.ble_sync_suite_app.sync.CheepSync
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.abs
 
 class BleManager(
     private val activity: ComponentActivity,
@@ -43,32 +45,18 @@ class BleManager(
     var bluetoothGatt: BluetoothGatt? = null
         private set
 
-    // -----------------------------
-    // CheepSync drift management
-    // Model: Tr ≈ α + β * tb
-    // tb = beacon timestamp in PHONE units? (we keep tb in beacon-ns, Tr in phone-ns)
-    // α = offset (ns), β = skew (dimensionless scale factor)
-    // -----------------------------
-    private data class CheepSyncSample(
-        val tbNs: Double, // beacon time converted to ns (beacon clock domain)
-        val TrNs: Double  // phone monotonic receive time in ns (phone clock domain)
-    )
+    // CheepSync: delegated to sync.CheepSync (standalone module, no BLE dependency)
+    private val cheepSync = CheepSync(windowSize = CheepSync.DEFAULT_WINDOW_SIZE)
 
-    private val cheepSyncWindow = ArrayDeque<CheepSyncSample>()
-    private val CHEEP_SYNC_WINDOW_SIZE = 50
-
-    // Regression outputs
-    private val _cheepSyncAlpha = MutableStateFlow(0.0) // ns
-    private val _cheepSyncBeta = MutableStateFlow(1.0)  // scale
+    private val _cheepSyncAlpha = MutableStateFlow(0.0)
+    private val _cheepSyncBeta = MutableStateFlow(1.0)
     val cheepSyncAlpha: StateFlow<Double> = _cheepSyncAlpha.asStateFlow()
     val cheepSyncBeta: StateFlow<Double> = _cheepSyncBeta.asStateFlow()
-
-    // Optional: simple health metrics you can log/plot
     private val _cheepSyncRmsResidualMs = MutableStateFlow(0.0)
     val cheepSyncRmsResidualMs: StateFlow<Double> = _cheepSyncRmsResidualMs.asStateFlow()
 
     private fun resetCheepSync() {
-        cheepSyncWindow.clear()
+        cheepSync.reset()
         _cheepSyncAlpha.value = 0.0
         _cheepSyncBeta.value = 1.0
         _cheepSyncRmsResidualMs.value = 0.0
@@ -81,61 +69,10 @@ class BleManager(
      * using linear regression for frequency (β) and phase/offset (α). :contentReference[oaicite:2]{index=2}
      */
     private fun updateCheepSync(packet: EspPacket) {
-        // Phone receive time (monotonic, ns)
-        val TrNs = packet.receivedAtNs.toDouble()
-
-        // Beacon time: packet.tUs is beacon microseconds since beacon boot
-        val tbNs = packet.tUs * 1000.0 // μs -> ns
-
-        // Append to sliding window
-        cheepSyncWindow.addLast(CheepSyncSample(tbNs = tbNs, TrNs = TrNs))
-        while (cheepSyncWindow.size > CHEEP_SYNC_WINDOW_SIZE) {
-            cheepSyncWindow.removeFirst()
-        }
-
-        // Need at least 2 points for regression
-        if (cheepSyncWindow.size < 2) return
-
-        // Compute means
-        val n = cheepSyncWindow.size.toDouble()
-        var tbMean = 0.0
-        var TrMean = 0.0
-        for (s in cheepSyncWindow) {
-            tbMean += s.tbNs
-            TrMean += s.TrNs
-        }
-        tbMean /= n
-        TrMean /= n
-
-        // Least squares:
-        // β = cov(tb,Tr) / var(tb)
-        // α = TrMean - β*tbMean
-        var cov = 0.0
-        var varTb = 0.0
-        for (s in cheepSyncWindow) {
-            val x = s.tbNs - tbMean
-            val y = s.TrNs - TrMean
-            cov += x * y
-            varTb += x * x
-        }
-
-        if (varTb == 0.0) return
-
-        val beta = cov / varTb
-        val alpha = TrMean - beta * tbMean
-
-        _cheepSyncBeta.value = beta
-        _cheepSyncAlpha.value = alpha
-
-        // Optional: compute RMS residual (how well the line fits the window)
-        var rss = 0.0
-        for (s in cheepSyncWindow) {
-            val pred = alpha + beta * s.tbNs
-            val r = s.TrNs - pred
-            rss += r * r
-        }
-        val rmsNs = kotlin.math.sqrt(rss / n)
-        _cheepSyncRmsResidualMs.value = rmsNs / 1_000_000.0
+        cheepSync.addSample(packet.tUs, packet.receivedAtNs)
+        _cheepSyncAlpha.value = cheepSync.alpha
+        _cheepSyncBeta.value = cheepSync.beta
+        _cheepSyncRmsResidualMs.value = cheepSync.rmsResidualMs
     }
 
     /**
@@ -144,23 +81,15 @@ class BleManager(
      *
      * This is the “use the estimated skew+offset to coordinate time” step. :contentReference[oaicite:3]{index=3}
      */
-    fun mapBeaconToPhoneNs(beaconTimeUs: Long): Long {
-        val tbNs = beaconTimeUs.toDouble() * 1000.0
-        val alpha = _cheepSyncAlpha.value
-        val beta = _cheepSyncBeta.value
-        return (alpha + beta * tbNs).toLong()
-    }
+    fun mapBeaconToPhoneNs(beaconTimeUs: Long): Long =
+        cheepSync.mapBeaconToReceiverNs(beaconTimeUs)
 
     /**
      * Convenience: estimate current one-way delay-like residual for the most recent packet.
      * (Not the paper’s low-level event “best fit” selection; just a sanity metric.)
      */
-    fun estimateLatestResidualMs(packet: EspPacket): Double {
-        val TrNs = packet.receivedAtNs.toDouble()
-        val tbNs = packet.tUs * 1000.0
-        val pred = _cheepSyncAlpha.value + _cheepSyncBeta.value * tbNs
-        return abs(TrNs - pred) / 1_000_000.0
-    }
+    fun estimateLatestResidualMs(packet: EspPacket): Double =
+        cheepSync.residualMs(packet.tUs, packet.receivedAtNs)
 
     // -----------------------------
     // BLE scanning
@@ -182,9 +111,7 @@ class BleManager(
         }
     }
 
-    // -----------------------------
-    // GATT callbacks
-    // -----------------------------
+    // ----- GATT callbacks: connection lifecycle and characteristic notifications -----
     private val gattCallback = object : BluetoothGattCallback() {
 
         @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
@@ -224,6 +151,8 @@ class BleManager(
             }
         }
 
+        // Called when the ESP32 characteristic sends a notification (each packet).
+        // Packet layout: 4 bytes seq (u32 LE), 8 bytes tUs (u64 LE). We add receivedAtNs on the phone.
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (characteristic.uuid != ESP32_CHAR_UUID) return
 
@@ -238,7 +167,6 @@ class BleManager(
                     receivedAtNs = SystemClock.elapsedRealtimeNanos()
                 )
 
-                // Update CheepSync regression (α,β) on every packet
                 updateCheepSync(packet)
 
                 activity.runOnUiThread { onPacketReceived(packet) }
@@ -251,6 +179,7 @@ class BleManager(
             if (status != BluetoothGatt.GATT_SUCCESS) Log.e("BLE", "Descriptor write failed")
         }
 
+        // After connection: find ESP32 service/characteristic, enable notifications, report to UI.
         @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
@@ -293,9 +222,7 @@ class BleManager(
         }
     }
 
-    // -----------------------------
-    // Descriptor write helper
-    // -----------------------------
+    // ----- Helper: write CCCD so the server knows we want notifications (Android API version differences) -----
     @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
     @SuppressLint("MissingPermission")
     private fun writeClientConfigValue(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, value: ByteArray) {
@@ -310,9 +237,7 @@ class BleManager(
         }
     }
 
-    // -----------------------------
-    // Public BLE controls
-    // -----------------------------
+    // ----- Public BLE controls (called from MainActivity / UI) -----
     @SuppressLint("MissingPermission")
     fun startBleScan() {
         if (!hasScanPermission()) {
@@ -337,6 +262,7 @@ class BleManager(
         (bluetoothLeScanner ?: bluetoothAdapter?.bluetoothLeScanner)?.stopScan(bleScanCallback)
     }
 
+    /** Enable or disable BLE notifications for a characteristic (e.g. ESP32 data stream). */
     @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
     @SuppressLint("MissingPermission")
     fun setNotificationsForCharacteristic(info: CharacteristicInfo, enable: Boolean): Boolean {
@@ -356,6 +282,7 @@ class BleManager(
         return true
     }
 
+    /** One-off read of a characteristic; result ends up in readValues[uuid] and can be shown in UI. */
     @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
     @SuppressLint("MissingPermission")
     fun readCharacteristicOnce(charUuid: java.util.UUID, serviceUuid: java.util.UUID) {
@@ -365,6 +292,7 @@ class BleManager(
         } ?: Log.e("BLE", "Characteristic not found")
     }
 
+    /** Connect to a BLE device by address. Stops scan, clears previous GATT, then connectGatt. */
     @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
     @SuppressLint("MissingPermission")
     fun connectToDevice(address: String) {
@@ -385,6 +313,7 @@ class BleManager(
         }, 750)
     }
 
+    /** Disconnect and close GATT; reset CheepSync state. */
     @SuppressLint("MissingPermission")
     fun disconnect() {
         try { bluetoothGatt?.disconnect() } catch (_: SecurityException) {}

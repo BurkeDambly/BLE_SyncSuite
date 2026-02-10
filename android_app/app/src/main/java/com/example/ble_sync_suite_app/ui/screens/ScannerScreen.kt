@@ -23,6 +23,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+// Row: "Scanning Enabled" / "Scan Disabled" label + Switch to start/stop BLE scan.
+
 @Composable
 fun BleScanToggle(isScanning: Boolean, onToggle: (Boolean) -> Unit) {
     Row(
@@ -39,6 +41,7 @@ fun BleScanToggle(isScanning: Boolean, onToggle: (Boolean) -> Unit) {
     }
 }
 
+// Text field to filter the scanned device list by name/address.
 @Composable
 fun FilterBar(query: String, onQueryChanged: (String) -> Unit) {
     OutlinedTextField(
@@ -48,6 +51,8 @@ fun FilterBar(query: String, onQueryChanged: (String) -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
     )
 }
+
+// Scanner screen: Back, scan toggle, filter bar, list of scanned devices. Tapping a device connects.
 
 @Composable
 fun MainScannerScreen(
@@ -66,6 +71,7 @@ fun MainScannerScreen(
         FilterBar(query = searchQuery, onQueryChanged = onQueryChanged)
         val filtered = scannedDevices.filter { it.contains(searchQuery, ignoreCase = true) }
         LazyColumn {
+            // Each item is "Name [address]"; on click we pass address and name for connection
             items(filtered) { deviceInfo ->
                 val address = deviceInfo.substringAfter("[").substringBefore("]")
                 val name = deviceInfo.substringBefore(" [")

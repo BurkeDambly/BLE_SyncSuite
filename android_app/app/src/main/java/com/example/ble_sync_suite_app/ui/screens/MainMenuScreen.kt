@@ -17,6 +17,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+// Main menu: single button to go to "Connect to Device" (scanner screen).
+
 @Composable
 fun MainMenuScreen(onConnectToDevice: () -> Unit) {
     Column(

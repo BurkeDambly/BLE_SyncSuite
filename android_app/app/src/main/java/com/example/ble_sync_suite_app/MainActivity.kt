@@ -1,5 +1,7 @@
 package com.example.ble_sync_suite_app
 
+// Main entry: permissions, navigation (welcome -> menu -> scanner -> data -> sync stats), BleManager wiring.
+
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
@@ -31,21 +33,25 @@ import kotlinx.coroutines.flow.asStateFlow
 
 class MainActivity : ComponentActivity() {
 
+    // ----- Screen navigation: which screen is visible (one of these true at a time, except welcome) -----
     private var showWelcomeScreen by mutableStateOf(true)
     private var showMainMenu by mutableStateOf(false)
     private var showScannerScreen by mutableStateOf(false)
     private var showDataScreen by mutableStateOf(false)
     private var showGraphScreen by mutableStateOf(false)
+
     private var startScanWhenPermissionGranted = false
     private var isScanning by mutableStateOf(false)
     private var searchQuery by mutableStateOf("")
     private var connectedDeviceName by mutableStateOf("")
     private val scannedDevices: SnapshotStateList<String> = mutableStateListOf()
     private val characteristicInfoList = mutableStateListOf<CharacteristicInfo>()
+    /** Kept for the Sync statistics screen (GraphScreen); capped at 1000. */
     private val esp32PacketHistory = mutableStateListOf<EspPacket>()
     private val _latestEspPacket = kotlinx.coroutines.flow.MutableStateFlow<EspPacket?>(null)
     val latestEspPacket = _latestEspPacket.asStateFlow()
 
+    /** Android 12+ needs explicit BLUETOOTH_SCAN / BLUETOOTH_CONNECT. */
     private val isAtLeastS get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     private fun permissionsToRequest(): Array<String> {
         val required = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
@@ -59,6 +65,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var bleManager: BleManager
 
+    /** If user had asked to scan before permission was granted, start scan after grant. */
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
         if (results.any { !it.value }) {
             Toast.makeText(this, "Some permissions were denied.", Toast.LENGTH_LONG).show()
@@ -112,6 +119,7 @@ class MainActivity : ComponentActivity() {
             }
         )
 
+        // Compose UI: single when over which screen to show (order matters; first match wins)
         setContent {
             BleSyncSuiteAppTheme {
                 Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
@@ -188,12 +196,14 @@ class MainActivity : ComponentActivity() {
         requestPermissionsModernWay()
     }
 
+    /** Request any missing permissions; show toast if all already granted. */
     private fun requestPermissionsModernWay() {
         val needed = permissionsToRequest().filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
         else Toast.makeText(this, "All permissions already granted!", Toast.LENGTH_SHORT).show()
     }
 
+    /** If we have scan permission, run callback; else request permission and set flag to start scan when granted. */
     private fun ensureScanPermission(onGranted: () -> Unit) {
         if (!isAtLeastS || hasScanPermission()) onGranted()
         else {

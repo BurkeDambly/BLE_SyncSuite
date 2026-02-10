@@ -3,13 +3,19 @@ package com.example.ble_sync_suite_app
 import androidx.compose.runtime.mutableStateMapOf
 import java.util.UUID
 
-// --- Data classes ---
+// =============================================================================
+// BLE models and constants
+// =============================================================================
+
+// ----- Data classes -----
+/** One ESP32 BLE packet: sequence number, beacon time in μs, and phone receive time in ns (set when received). */
 data class EspPacket(
     val seq: Long,
     val tUs: Long,
     val receivedAtNs: Long
 )
 
+/** BLE characteristic metadata for UI (service/char UUID, name, properties string). */
 data class CharacteristicInfo(
     val serviceUuid: UUID,
     val serviceName: String,
@@ -18,10 +24,14 @@ data class CharacteristicInfo(
     val properties: String
 )
 
-// --- Constants ---
+// ----- Android permissions (Android 12+) -----
 const val PERMISSION_BLUETOOTH_SCAN = "android.permission.BLUETOOTH_SCAN"
 const val PERMISSION_BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
+
+// ----- BLE UUIDs -----
+/** Standard CCCD descriptor UUID (required to enable/disable notifications). */
 val CLIENT_CONFIG_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
+/** Custom service/characteristic used by the ESP32 for streaming (seq + tUs). */
 val ESP32_SERVICE_UUID = UUID.fromString("0000181a-0000-1000-8000-00805f9b34fb")
 val ESP32_CHAR_UUID = UUID.fromString("0015a1a1-1212-efde-1523-785feabcd123")
 
@@ -40,15 +50,18 @@ val standardCharacteristicNames = mapOf(
     UUID.fromString("00002A19-0000-1000-8000-00805f9b34fb") to "Battery Level"
 )
 
+/** Last read value per characteristic UUID (for UI "Read" button). */
 val readValues = mutableStateMapOf<UUID, String>()
 
-// --- Byte parsing ---
+// ----- Byte parsing (little-endian) -----
+/** Read 4 bytes as unsigned 32-bit little-endian. */
 fun u32LE(bytes: ByteArray, offset: Int): Long =
     ((bytes[offset].toUByte().toLong() and 0xFF) shl 0) or
             ((bytes[offset + 1].toUByte().toLong() and 0xFF) shl 8) or
             ((bytes[offset + 2].toUByte().toLong() and 0xFF) shl 16) or
             ((bytes[offset + 3].toUByte().toLong() and 0xFF) shl 24)
 
+/** Read 8 bytes as unsigned 64-bit little-endian. */
 fun u64LE(bytes: ByteArray, offset: Int): Long =
     ((bytes[offset].toUByte().toLong() and 0xFF) shl 0) or
             ((bytes[offset + 1].toUByte().toLong() and 0xFF) shl 8) or

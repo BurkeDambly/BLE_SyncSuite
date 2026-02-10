@@ -25,6 +25,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
+// First screen: splash with fade/scale animation, then callback to go to main menu after 2.7s.
+
 @Composable
 fun WelcomeScreen(onAnimationFinished: () -> Unit) {
     var visible by remember { mutableStateOf(false) }

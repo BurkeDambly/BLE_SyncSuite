@@ -50,6 +50,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+// Screen shown after connecting to a device: latest ESP32 packet, list of characteristics (Read/Notify).
+// Tapping the ESP32 characteristic opens the Sync statistics screen; enabling Notify also opens it.
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DataDisplayScreen(
@@ -90,6 +93,7 @@ fun DataDisplayScreen(
         }
         Spacer(Modifier.height(16.dp))
 
+        // Latest packet from ESP32 (seq, tUs, receivedAtNs) — updated as notifications arrive
         if (latestPacket != null) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).background(Color(0xFFE3F2FD), RoundedCornerShape(8.dp)).padding(16.dp)
@@ -103,6 +107,7 @@ fun DataDisplayScreen(
             Spacer(Modifier.height(8.dp))
         }
 
+        // List of BLE characteristics: ESP32 char opens sync stats; others expand to show Read/Notify
         LazyColumn(state = listState) {
             items(characteristicInfoList) { info ->
                 val bringIntoViewRequester = remember { BringIntoViewRequester() }
@@ -127,6 +132,7 @@ fun DataDisplayScreen(
                     if (expandedCharUuid == info.charUuid) {
                         Column(Modifier.padding(top = 12.dp)) {
                             Button(onClick = {
+                                // Read once; result appears in readValues and "Last Value" below
                                 if (hasConnectPermission(context)) {
                                     try { readCharacteristicOnce(info.charUuid, info.serviceUuid) }
                                     catch (e: SecurityException) {
@@ -136,6 +142,7 @@ fun DataDisplayScreen(
                                 } else Toast.makeText(context, "Bluetooth permission not granted", Toast.LENGTH_SHORT).show()
                             }) { Text("Read") }
                             Button(onClick = {
+                                // Toggle notifications; when enabling for ESP32 char we open sync stats screen
                                 if (!hasConnectPermission(context)) {
                                     Toast.makeText(context, "Bluetooth permission not granted", Toast.LENGTH_SHORT).show()
                                     return@Button
